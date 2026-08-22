@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {
+      "id": "RET-001",
+      "role": "viewer",
+      "department": "retail-banking",
+      "question": "Can employees work remotely during their probation period?",
+      "expected_fixture_ids": ["policy-remote-work-001"]
+    },
+    {
+      "id": "RET-002",
+      "role": "viewer",
+      "department": "retail-banking",
+      "question": "How many annual leave days can be carried forward and when do they expire?",
+      "expected_fixture_ids": ["policy-leave-001"]
+    },
+    {
+      "id": "RET-003",
+      "role": "analyst",
+      "department": "payments",
+      "question": "Which payment incidents were caused by recurring database connection pool saturation?",
+      "expected_fixture_ids": ["incident-payments-001", "incident-payments-002", "incident-payments-006"]
+    },
+    {
+      "id": "RET-004",
+      "role": "analyst",
+      "department": "payments",
+      "question": "What caused the payment DNS resolution outage and how was it remediated?",
+      "expected_fixture_ids": ["incident-payments-003"]
+    },
+    {
+      "id": "RET-005",
+      "role": "analyst",
+      "department": "payments",
+      "question": "Find the expired authorization certificate incident.",
+      "expected_fixture_ids": ["incident-payments-004"]
+    },
+    {
+      "id": "RET-006",
+      "role": "analyst",
+      "department": "payments",
+      "question": "How should a poison message blocking a payment event partition be handled?",
+      "expected_fixture_ids": ["incident-payments-005", "runbook-queue-backlog-001"]
+    },
+    {
+      "id": "RET-007",
+      "role": "analyst",
+      "department": "technology",
+      "question": "What controls apply to third-party production access?",
+      "expected_fixture_ids": ["policy-vendor-access-001"]
+    },
+    {
+      "id": "RET-008",
+      "role": "administrator",
+      "department": "technology",
+      "question": "What delayed the CORE-515 recovery database promotion exercise?",
+      "expected_fixture_ids": ["incident-core-001"]
+    },
+    {
+      "id": "RET-009",
+      "role": "administrator",
+      "department": "technology",
+      "question": "What approvals and checks are required before core database failover?",
+      "expected_fixture_ids": ["runbook-db-failover-001"]
+    },
+    {
+      "id": "RET-010",
+      "role": "analyst",
+      "department": "security",
+      "question": "Which incident contained malicious instructions in a support attachment?",
+      "expected_fixture_ids": ["incident-injection-001"]
+    },
+    {
+      "id": "RET-011",
+      "role": "administrator",
+      "department": "technology",
+      "question": "How are fraud cases reviewed and which information is restricted?",
+      "expected_fixture_ids": ["runbook-fraud-restricted-001", "spec-fraud-signals-001"]
+    },
+    {
+      "id": "RET-012",
+      "role": "analyst",
+      "department": "payments",
+      "question": "What resilience tests are required for salary days and payment bursts?",
+      "expected_fixture_ids": ["spec-payments-resilience-001"]
+    }
+  ]
+}
