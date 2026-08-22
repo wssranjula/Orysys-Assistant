@@ -5,8 +5,8 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 6 complete — multi-turn conversation memory, durable LangGraph
-> checkpoints, controlled analysis, and read-only enterprise MCP tools are integrated.**
+> Current status: **Phase 7 complete — layered input/content guardrails, deterministic citation
+> validation, bounded retries, deadlines, and graceful degradation are integrated.**
 
 ## POC scope
 
@@ -206,6 +206,20 @@ employee, service, and incident operations through an MCP adapter. Both remain b
 schema validation, timeouts, response-size limits, audit logs, and visible tool activity. See
 [docs/memory-and-tools.md](docs/memory-and-tools.md).
 
+### Phase 7 guardrails and graceful degradation
+
+Every request is validated before state or agent work begins. Retrieved text is explicitly wrapped
+as untrusted evidence and instruction-like fragments are quarantined. Grounded responses carry an
+internal current-request evidence ledger; citations, authorization scope, inline markers, and
+response policy are validated before the answer is persisted or streamed. A single constrained
+repair can restore missing markers, while fabricated citations fail closed to
+`insufficient_evidence`.
+
+Temporary retrieval and MCP failures use bounded retries. Sparse failure uses labeled dense-only
+results, MCP failure falls back to available authorized documents, research workers remain isolated,
+and the overall request deadline cancels outstanding work. See
+[docs/guardrails-and-degradation.md](docs/guardrails-and-degradation.md).
+
 ## Delivery roadmap
 
 1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
@@ -215,7 +229,8 @@ schema validation, timeouts, response-size limits, audit logs, and visible tool 
 5. Phase 4 — complete: controlled root agent, three specialists, skills, and delegation traces
 6. Phase 5 — complete: bounded concurrent research graph with follow-up recursion
 7. Phase 6 — complete: owner-isolated memory, checkpoints, controlled analysis, and MCP tools
-8. Phase 7+ — guardrails, citation validation, hardening, observability, and deployment
+8. Phase 7 — complete: guardrails, evidence-ledger validation, retries, and safe degradation
+9. Phase 8+ — activity UX, observability, evaluation, hardening, and deployment
 
 The original assessment is preserved in [assignment.md](assignment.md); the working plan is
 [lead_ai_assignment_phase_implementation_plan.md](lead_ai_assignment_phase_implementation_plan.md).
