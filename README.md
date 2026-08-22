@@ -8,6 +8,13 @@ session memory, and LangSmith observability.
 > Current status: **Phase 8 complete — the safe real-time activity panel, correlated trace tree,
 > golden evaluation runner, stored metrics, and role-complete end-to-end suite are integrated.**
 
+## Problem statement
+
+Employees need one conversational entry point across policies, architecture, runbooks, incidents,
+product specifications, and meeting notes. A useful answer is not enough: the platform must prove
+which authorized evidence supported it, preserve owned conversation context, constrain tools by
+role, expose safe operational activity, and fail without fabricating policy or leaking data.
+
 ## POC scope
 
 The POC supports one fictional organization (`commercial-bank`), three hardcoded users and
@@ -63,7 +70,7 @@ tests/                  unit, graph, integration, and end-to-end suites
 docs/                   architecture, scope, contracts, security, and ADRs
 ```
 
-## Run the walking skeleton
+## Quick start
 
 The project targets Python 3.11–3.13 (3.12 recommended) and uses `uv.lock` for reproducible
 installs.
@@ -97,7 +104,29 @@ Compose starts PostgreSQL, Redis, the stateless MCP server, API, and UI. Postgre
 owner-isolated conversation records and LangGraph checkpoints. The in-memory adapters are limited
 to tests and explicit single-process development.
 
-### Demo identities
+For the complete detached startup, ingestion verification, smoke test, Pinecone mode, and shutdown
+commands, see [docs/deployment.md](docs/deployment.md).
+
+## Environment variables
+
+Copy `.env.example` and keep `.env` untracked. The principal controls are:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RETRIEVAL_BACKEND` | `memory` | deterministic local retrieval or `pinecone` |
+| `MEMORY_BACKEND` | `memory` locally; `postgres` in Compose | conversation/checkpoint storage |
+| `RATE_LIMIT_BACKEND` | `redis` | shared token-bucket adapter |
+| `MCP_BACKEND` | `memory` locally; `http` in Compose | enterprise-tool transport |
+| `LANGSMITH_TRACING` | `false` | enable trace export when a key is present |
+| `API_PORT`, `UI_PORT` | `8000`, `8501` | loopback Compose ports |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | overall request deadline |
+
+Pinecone mode additionally requires `PINECONE_API_KEY`, index/host configuration,
+`OPENAI_API_KEY`, and a matching embedding dimension. All limits and adapter variables are listed
+in [.env.example](.env.example); non-secret policy defaults are in
+[config/defaults.yaml](config/defaults.yaml).
+
+## Sample users
 
 These credentials are fictional and exist only for the assessment POC:
 
@@ -112,6 +141,16 @@ demo passwords. Successful login returns an opaque bearer token whose identity a
 resolved only by the backend.
 
 Do not commit `.env` or secrets.
+
+## Example questions
+
+- Viewer: “What does Commercial Bank's remote-work policy allow?”
+- Analyst research: “Summarize payment-failure outages from the last year and identify recurring
+  root causes.”
+- Analyst analysis: “Show the distribution of retrieved incidents by document type.”
+- Analyst MCP: “Who owns the Payments Gateway service?”
+- Follow-up memory: “Does that remote-work rule apply during probation?”
+- Administrator: “Explain the restricted fraud investigation playbook.”
 
 ### LangSmith tracing
 
@@ -235,6 +274,53 @@ route accuracy, citation validity, groundedness, permission accuracy, expected c
 and degraded-answer clarity, with zero unauthorized-evidence exposure. See
 [docs/observability-and-evaluation.md](docs/observability-and-evaluation.md).
 
+## Agent and RLM design
+
+The API routes focused knowledge directly and delegates research, controlled analysis, or approved
+enterprise reads to exactly three specialists. The simplified Recursive Language Model path is a
+compiled LangGraph that plans targeted tasks, fans out bounded workers, reduces evidence, checks
+coverage, and permits limited follow-up recursion. See [docs/agents.md](docs/agents.md) and
+[docs/research-graph.md](docs/research-graph.md).
+
+## Retrieval, security, failure handling, and memory
+
+- Retrieval: dense plus BM25 fusion, conservative relevance filtering, trusted namespace/metadata
+  scope, deterministic attribution, and a Pinecone adapter. See [docs/retrieval.md](docs/retrieval.md).
+- Security: backend-owned identity/scope, one authorization matrix, typed Tool Gateway, content
+  quarantine, citation ledger, rate limiting, and safe activity metadata. See
+  [docs/security.md](docs/security.md).
+- Failure handling: bounded retries/deadlines, worker isolation, dense-only degradation, document
+  fallback, and insufficient-evidence responses. See
+  [docs/guardrails-and-degradation.md](docs/guardrails-and-degradation.md).
+- Memory: owner-isolated PostgreSQL turns and strict LangGraph checkpoints with bounded summaries.
+  See [docs/memory-and-tools.md](docs/memory-and-tools.md).
+
+## Observability and testing
+
+Every request has one trace ID across SSE, structured logs, and the LangSmith context. The activity
+panel displays safe agent/node/tool/retrieval/memory/validation summaries. The test pyramid covers
+unit, graph, integration, failure injection, golden evaluation, and API-to-agent end-to-end paths
+for all three roles.
+
+```powershell
+uv run ruff check .
+uv run mypy src
+uv run pytest
+uv run python scripts/run_golden_evaluation.py
+uv run python scripts/check_public_readiness.py
+```
+
+The stored report is [data/golden_evaluation_report.json](data/golden_evaluation_report.json).
+
+## Assumptions, known limitations, and future improvements
+
+The default is an offline deterministic assessment path; Pinecone, hosted model synthesis, and
+LangSmith require external credentials. Authentication is a hardcoded POC fixture, Compose is
+single-host, feedback is not persisted, and the assistant never performs transactions. The
+rationale, limitations, and production follow-ups are documented in
+[docs/assumptions-and-tradeoffs.md](docs/assumptions-and-tradeoffs.md). A step-by-step evaluator
+walkthrough is available in [docs/demo-script.md](docs/demo-script.md).
+
 ## Delivery roadmap
 
 1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
@@ -246,7 +332,7 @@ and degraded-answer clarity, with zero unauthorized-evidence exposure. See
 7. Phase 6 — complete: owner-isolated memory, checkpoints, controlled analysis, and MCP tools
 8. Phase 7 — complete: guardrails, evidence-ledger validation, retries, and safe degradation
 9. Phase 8 — complete: activity UX, correlated traces, golden evaluation, and role E2E tests
-10. Phase 9+ — packaging, delivery documentation, and deployment verification
+10. Phase 9 — complete: hardened Compose packaging, delivery checks, CI, and assessment docs
 
 The original assessment is preserved in [assignment.md](assignment.md); the working plan is
 [lead_ai_assignment_phase_implementation_plan.md](lead_ai_assignment_phase_implementation_plan.md).
