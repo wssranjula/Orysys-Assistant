@@ -18,9 +18,10 @@ dependencies = [
   "langgraph>=1.0,<2",
   "langsmith>=0.4,<1",
   "mcp>=1.12,<2",
-  "pinecone>=7,<8",
+  "pinecone[asyncio]>=7,<8",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.10,<3",
+  "pyyaml>=6,<7",
   "rank-bm25>=0.2.2,<1",
   "redis>=6,<7",
   "sqlalchemy>=2.0,<3",
@@ -39,6 +40,7 @@ dev = [
   "pytest-asyncio>=1.1,<2",
   "pytest-cov>=6.2,<7",
   "ruff>=0.12,<1",
+  "types-pyyaml>=6.0,<7",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -56,6 +58,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/generate_sample_documents.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
