@@ -57,9 +57,21 @@ class KnowledgeSearchTool:
             warnings.append("Sparse retrieval was unavailable; dense-only evidence was used.")
         if any(item.metadata.get("prompt_injection_flagged") for item in evidence):
             warnings.append("Suspicious instructions in retrieved content were quarantined.")
+        candidate_count = max(
+            (int(item.metadata.get("candidate_document_count", 0)) for item in evidence),
+            default=0,
+        )
+        retrieval_mode = (
+            "dense_only"
+            if any(item.metadata.get("retrieval_degraded") for item in evidence)
+            else "hybrid"
+        )
         return {
             "evidence": [item.model_dump(mode="json") for item in evidence],
             "warnings": warnings,
+            "candidate_count": candidate_count,
+            "selected_evidence_count": len(evidence),
+            "retrieval_mode": retrieval_mode,
         }
 
 

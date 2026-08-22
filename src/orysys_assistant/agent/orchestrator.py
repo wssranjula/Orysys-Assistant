@@ -78,7 +78,10 @@ class RootOrchestrator:
                 node="intent_routing",
                 status="completed",
                 message=f"Selected {route.value} route.",
-                metadata={"route": route.value},
+                metadata={
+                    "route": route.value,
+                    "plan_summary": self._plan_summary(route),
+                },
             ),
         )
 
@@ -105,7 +108,17 @@ class RootOrchestrator:
         )
         evidence = [Evidence.model_validate(item) for item in result["evidence"]]
         warnings = [str(item) for item in result.get("warnings", [])]
-        await self._retrieval_transition(sink, "completed", len(evidence))
+        await self._retrieval_transition(
+            sink,
+            "completed",
+            len(evidence),
+            {
+                "candidate_count": int(result.get("candidate_count", len(evidence))),
+                "selected_evidence_count": len(evidence),
+                "retrieval_mode": str(result.get("retrieval_mode", "hybrid")),
+                "tool_name": "knowledge_search",
+            },
+        )
         return AgentExecutionResult(
             route=AgentRoute.DIRECT_KNOWLEDGE,
             answer=self._evidence_answer(evidence),
@@ -160,7 +173,17 @@ class RootOrchestrator:
                 "knowledge_search", {"query": question, "top_k": 6}, context
             )
             evidence = [Evidence.model_validate(item) for item in fallback["evidence"]]
-            await self._retrieval_transition(sink, "completed", len(evidence))
+            await self._retrieval_transition(
+                sink,
+                "completed",
+                len(evidence),
+                {
+                    "candidate_count": int(fallback.get("candidate_count", len(evidence))),
+                    "selected_evidence_count": len(evidence),
+                    "retrieval_mode": str(fallback.get("retrieval_mode", "hybrid")),
+                    "tool_name": "knowledge_search",
+                },
+            )
             if evidence:
                 return AgentExecutionResult(
                     route=AgentRoute.DIRECT_KNOWLEDGE,
@@ -186,7 +209,11 @@ class RootOrchestrator:
             await sink(transition)
 
     async def _retrieval_transition(
-        self, sink: TransitionSink | None, status: str, evidence_count: int
+        self,
+        sink: TransitionSink | None,
+        status: str,
+        evidence_count: int,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         await self._emit(
             sink,
@@ -200,7 +227,11 @@ class RootOrchestrator:
                     if status == "started"
                     else f"Retrieved {evidence_count} authorized evidence records."
                 ),
-                metadata={"evidence_count": evidence_count} if status == "completed" else {},
+                metadata=(
+                    {"evidence_count": evidence_count, **(metadata or {})}
+                    if status == "completed"
+                    else {}
+                ),
             ),
         )
 
@@ -305,3 +336,12 @@ class RootOrchestrator:
         if not summary:
             return question
         return f"{question}\n\nPrior conversation summary:\n{summary}"
+
+    @staticmethod
+    def _plan_summary(route: AgentRoute) -> str:
+        return {
+            AgentRoute.DIRECT_KNOWLEDGE: "Search authorized knowledge and validate citations.",
+            AgentRoute.RESEARCH: "Delegate bounded multi-source research, then validate findings.",
+            AgentRoute.ANALYSIS: "Retrieve authorized records and run controlled analysis.",
+            AgentRoute.ENTERPRISE: "Call one approved read-only enterprise tool with fallback.",
+        }[route]

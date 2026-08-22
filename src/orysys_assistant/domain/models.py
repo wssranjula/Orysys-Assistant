@@ -39,6 +39,7 @@ class ActivityStatus(StrEnum):
 class ActivityEventType(StrEnum):
     REQUEST_RECEIVED = "request_received"
     AUTHENTICATION_COMPLETED = "authentication_completed"
+    ACCESS_SCOPE_BUILT = "access_scope_built"
     RATE_LIMIT_CHECKED = "rate_limit_checked"
     AGENT_STARTED = "agent_started"
     ROUTING_COMPLETED = "routing_completed"
@@ -54,6 +55,7 @@ class ActivityEventType(StrEnum):
     MEMORY_UPDATED = "memory_updated"
     MEMORY_LOADED = "memory_loaded"
     VALIDATION_STARTED = "validation_started"
+    VALIDATION_COMPLETED = "validation_completed"
     VALIDATION_FAILED = "validation_failed"
     ANSWER_STREAMING = "answer_streaming"
     REQUEST_COMPLETED = "request_completed"

@@ -8,6 +8,8 @@ from typing import Any
 import httpx
 import streamlit as st
 
+from orysys_assistant.observability.activity import project_activity_panel
+
 API_BASE_URL = os.getenv("UI_API_BASE_URL", "http://localhost:8000").rstrip("/")
 
 
@@ -35,29 +37,57 @@ def render_activity(events: list[dict[str, Any]], placeholder: Any) -> None:
     if not events:
         placeholder.info("Agent activity will appear here.")
         return
-    lines = []
-    for event in events[-12:]:
-        status = event.get("status", "in_progress")
-        marker = {
-            "completed": "✅",
-            "failed": "❌",
-            "denied": "⛔",
-            "degraded": "⚠️",
-            "started": "▶️",
-        }.get(status, "⏳")
-        label = event.get("event_type", "activity").replace("_", " ").title()
-        node = event.get("node")
-        suffix = f" · `{node}`" if node else ""
-        lines.append(f"{marker} **{label}**{suffix}  \n{event.get('message', '')}")
-    placeholder.markdown("\n\n".join(lines))
+    panel = project_activity_panel(events)
+    with placeholder.container():
+        if panel.degraded:
+            st.warning("This request is operating in partial or degraded mode.")
+        st.caption(f"Trace ID: `{panel.trace_id}`")
+        agent_column, node_column = st.columns(2)
+        agent_column.caption("Current agent")
+        agent_column.markdown(f"**{panel.current_agent.replace('_', ' ').title()}**")
+        node_column.caption("Graph node")
+        node_column.markdown(f"**`{panel.current_node}`**")
+        st.info(panel.plan_summary)
+
+        tool_column, retrieval_column = st.columns(2)
+        tool_column.caption("Active tool")
+        tool_column.markdown(f"**`{panel.tool_name}`**")
+        retrieval_column.caption("Retrieval mode")
+        retrieval_column.markdown(f"**{panel.retrieval_mode}**")
+        candidate_column, evidence_column = st.columns(2)
+        candidate_column.metric("Candidates", panel.candidate_count)
+        evidence_column.metric("Selected evidence", panel.selected_evidence_count)
+        st.caption(f"Memory: **{panel.memory_status}** · Validation: **{panel.validation_status}**")
+        if panel.retrieval_filters:
+            filters = " · ".join(
+                f"{key.replace('_', ' ')}: `{value}`"
+                for key, value in panel.retrieval_filters.items()
+            )
+            st.caption(f"Retrieval filters · {filters}")
+
+        st.markdown("##### Timeline")
+        for event in events[-12:]:
+            status = event.get("status", "in_progress")
+            marker = {
+                "completed": "✅",
+                "failed": "❌",
+                "denied": "⛔",
+                "degraded": "⚠️",
+                "started": "▶️",
+            }.get(status, "⏳")
+            label = event.get("event_type", "activity").replace("_", " ").title()
+            node = event.get("node")
+            suffix = f" · `{node}`" if node else ""
+            st.markdown(f"{marker} **{label}**{suffix}  \n{event.get('message', '')}")
 
 
-def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any) -> str:
+def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {"message": message}
     if st.session_state.conversation_id:
         payload["conversation_id"] = st.session_state.conversation_id
 
     answer = ""
+    final_response: dict[str, Any] = {}
     with (
         httpx.Client(timeout=httpx.Timeout(130, connect=5)) as client,
         client.stream(
@@ -80,6 +110,7 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
                 answer_placeholder.markdown(answer + "▌")
                 st.session_state.conversation_id = event["conversation_id"]
             elif event_name == "final":
+                final_response = event
                 answer = event["answer"]
                 st.session_state.conversation_id = event["conversation_id"]
                 if event.get("warnings"):
@@ -87,7 +118,19 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
                     answer_placeholder.markdown(f"{answer}\n\n> ⚠️ {warning}")
                 else:
                     answer_placeholder.markdown(answer)
-    return answer
+    return final_response or {"answer": answer, "citations": [], "warnings": []}
+
+
+def render_citations(citations: list[dict[str, Any]]) -> None:
+    if not citations:
+        return
+    with st.expander(f"Evidence sources ({len(citations)})"):
+        for citation in citations:
+            st.markdown(
+                f"**[{citation['citation_id']}] {citation['title']}**  \n"
+                f"Document: `{citation['document_id']}` · Chunk: `{citation['chunk_id']}`  \n"
+                f"Source: `{citation['source_path']}`"
+            )
 
 
 def login(username: str, password: str) -> dict[str, Any]:
@@ -115,7 +158,7 @@ def load_conversation(conversation_id: str) -> list[dict[str, str]]:
 
 st.set_page_config(page_title="Commercial Bank AI Assistant", page_icon="🏦", layout="wide")
 st.title("Commercial Bank AI Assistant")
-st.caption("Phase 6 · grounded multi-turn assistant with inspectable agent and tool activity")
+st.caption("Phase 8 · grounded assistant with safe real-time activity and cited evidence")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -160,6 +203,7 @@ with st.sidebar:
     identity = st.session_state.identity
     st.write(f"Signed in as **{identity['display_name']}**")
     st.caption(f"Role: {identity['role'].title()}")
+    st.caption(f"Conversation: {st.session_state.conversation_id or 'New conversation'}")
     if st.button("Sign out", use_container_width=True):
         st.session_state.clear()
         st.rerun()
@@ -180,17 +224,28 @@ with chat_column:
     for chat_message in st.session_state.messages:
         with st.chat_message(chat_message["role"]):
             st.markdown(chat_message["content"])
+            render_citations(chat_message.get("citations", []))
 
     prompt = st.chat_input("Ask a Commercial Bank knowledge question")
     if prompt:
+        st.session_state.activities = []
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
             answer_placeholder = st.empty()
             try:
-                answer = stream_turn(prompt, answer_placeholder, activity_placeholder)
+                final_response = stream_turn(prompt, answer_placeholder, activity_placeholder)
+                answer = final_response["answer"]
+                render_citations(final_response.get("citations", []))
             except (httpx.HTTPError, RuntimeError, json.JSONDecodeError) as exc:
                 answer = f"The assistant is unavailable: {exc}"
+                final_response = {"citations": []}
                 answer_placeholder.error(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "citations": final_response.get("citations", []),
+                }
+            )

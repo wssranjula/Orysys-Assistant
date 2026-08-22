@@ -35,6 +35,7 @@ class RetrievalService:
         dense_weight: float = 0.65,
         sparse_weight: float = 0.35,
         candidate_count: int = 20,
+        minimum_sparse_score: float = 0.1,
     ) -> None:
         if abs(dense_weight + sparse_weight - 1) > 1e-9:
             raise ValueError("dense and sparse weights must sum to 1")
@@ -44,6 +45,7 @@ class RetrievalService:
         self._dense_weight = dense_weight
         self._sparse_weight = sparse_weight
         self._candidate_count = candidate_count
+        self._minimum_sparse_score = minimum_sparse_score
 
     @traceable(name="hybrid-knowledge-retrieval", run_type="retriever")
     async def search(
@@ -84,7 +86,23 @@ class RetrievalService:
         sparse_degraded = isinstance(sparse_result, BaseException)
         dense_matches = dense_result
         sparse_matches = [] if sparse_degraded else cast(list[SearchMatch], sparse_result)
+        candidate_count = len({item.id for item in dense_matches + sparse_matches})
         evidence = self._combine(dense_matches, sparse_matches, top_k)
+        if not sparse_degraded:
+            evidence = [
+                item for item in evidence if (item.sparse_score or 0) >= self._minimum_sparse_score
+            ]
+        evidence = [
+            item.model_copy(
+                update={
+                    "metadata": {
+                        **item.metadata,
+                        "candidate_document_count": candidate_count,
+                    }
+                }
+            )
+            for item in evidence
+        ]
         if sparse_degraded:
             evidence = [
                 item.model_copy(

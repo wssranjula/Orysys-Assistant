@@ -181,7 +181,12 @@ class ResearchWorkflow:
         await self._node_event(runtime, "normalize_scope", "started")
         query = " ".join(state["query"].split())
         filters = self._query_filters(query)
-        await self._node_event(runtime, "normalize_scope", "completed")
+        await self._node_event(
+            runtime,
+            "normalize_scope",
+            "completed",
+            {"retrieval_filters": filters.model_dump(mode="json", exclude_none=True)},
+        )
         return {"query": query, "filters": filters}
 
     async def _planner(
@@ -231,6 +236,7 @@ class ResearchWorkflow:
     ) -> ResearchTaskResult:
         async with semaphore:
             await self._node_event(runtime, f"worker:{task.task_id}", "started")
+            worker_metadata: dict[str, Any] = {}
             parameters: dict[str, Any] = {
                 "query": task.question,
                 "top_k": self._limits.max_chunks_per_worker,
@@ -242,6 +248,13 @@ class ResearchWorkflow:
                         "knowledge_search", parameters, runtime.context.request_context
                     )
                 evidence = self._evidence_from_result(raw)
+                worker_metadata = {
+                    "candidate_count": int(raw.get("candidate_count", len(evidence))),
+                    "selected_evidence_count": len(evidence),
+                    "retrieval_mode": str(raw.get("retrieval_mode", "hybrid")),
+                    "retrieval_filters": task.filters.model_dump(mode="json", exclude_none=True),
+                    "tool_name": "knowledge_search",
+                }
                 findings = [
                     Finding(claim=self._claim(item), evidence_ids=[item.evidence_id])
                     for item in evidence
@@ -269,7 +282,11 @@ class ResearchWorkflow:
                 runtime,
                 f"worker:{task.task_id}",
                 "completed",
-                {"status": result.status, "evidence_count": len(result.evidence)},
+                {
+                    "status": result.status,
+                    "evidence_count": len(result.evidence),
+                    **worker_metadata,
+                },
             )
             return result
 

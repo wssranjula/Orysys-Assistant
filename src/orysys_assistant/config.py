@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     retrieval_sparse_weight: float = Field(default=0.35, ge=0, le=1)
     retrieval_candidate_count: int = Field(default=20, gt=0, le=100)
     retrieval_final_count: int = Field(default=6, gt=0, le=20)
+    retrieval_min_sparse_score: float = Field(default=0.1, ge=0, le=10)
     retrieval_retry_attempts: int = Field(default=2, ge=0, le=3)
     research_max_initial_tasks: int = Field(default=4, gt=0, le=8)
     research_max_followup_tasks: int = Field(default=2, ge=0, le=4)

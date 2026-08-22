@@ -79,6 +79,7 @@ class AnalysisSubagent:
                     node="structured_analysis",
                     status="started",
                     message="Controlled structured analysis started.",
+                    metadata={"tool_name": "structured_analysis"},
                 )
             )
         try:
@@ -119,7 +120,10 @@ class AnalysisSubagent:
                     node="structured_analysis",
                     status="completed",
                     message="Controlled structured analysis completed.",
-                    metadata={"rows_processed": result.rows_processed},
+                    metadata={
+                        "rows_processed": result.rows_processed,
+                        "tool_name": "structured_analysis",
+                    },
                 )
             )
         return AnalysisExecution(
@@ -154,6 +158,7 @@ class EnterpriseToolSubagent:
                     node=tool_name,
                     status="started",
                     message=f"Read-only enterprise tool {tool_name} started.",
+                    metadata={"tool_name": tool_name},
                 )
             )
         try:
@@ -179,7 +184,10 @@ class EnterpriseToolSubagent:
                         node=tool_name,
                         status="degraded",
                         message=f"Enterprise tool {tool_name} was unavailable.",
-                        metadata={"error_type": type(exc).__name__},
+                        metadata={
+                            "error_type": type(exc).__name__,
+                            "tool_name": tool_name,
+                        },
                     )
                 )
             return EnterpriseExecution(
@@ -198,6 +206,7 @@ class EnterpriseToolSubagent:
                     node=tool_name,
                     status="completed",
                     message=f"Read-only enterprise tool {tool_name} completed.",
+                    metadata={"tool_name": tool_name},
                 )
             )
         return EnterpriseExecution(

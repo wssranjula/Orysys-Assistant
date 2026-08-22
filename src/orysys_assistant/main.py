@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
@@ -20,10 +21,14 @@ from orysys_assistant.security.authorization import AuthorizationPolicy
 from orysys_assistant.security.rate_limit import TokenBucketRateLimiter, build_rate_limiter
 from orysys_assistant.tools.gateway import ToolGateway
 
+if TYPE_CHECKING:
+    from orysys_assistant.tools.mcp_client import EnterpriseClient
+
 
 def create_app(
     settings: Settings | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
+    enterprise_client: "EnterpriseClient | None" = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
@@ -34,7 +39,12 @@ def create_app(
     resolved_rate_limiter = rate_limiter or build_rate_limiter(resolved_settings)
     tool_gateway = ToolGateway(authorization_policy)
     memory_runtime = MemoryRuntime(resolved_settings)
-    agent_runtime = AgentRuntimeManager(resolved_settings, tool_gateway, memory_runtime)
+    agent_runtime = AgentRuntimeManager(
+        resolved_settings,
+        tool_gateway,
+        memory_runtime,
+        enterprise_client=enterprise_client,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:

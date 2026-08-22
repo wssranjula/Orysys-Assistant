@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Request
+from langsmith import tracing_context
 from sse_starlette.sse import EventSourceResponse
 
 from orysys_assistant.agent.models import AgentTransition
@@ -41,6 +42,7 @@ from orysys_assistant.guardrails.input import InputGuard
 from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.memory.models import ConversationRecord
 from orysys_assistant.memory.repository import ConversationRepository
+from orysys_assistant.observability.activity import sanitize_activity_metadata
 from orysys_assistant.observability.logging import get_logger
 from orysys_assistant.security.models import TrustedRequestContext
 
@@ -75,7 +77,7 @@ def _activity(
         message=message,
         agent=agent,
         node=node,
-        metadata=metadata or {},
+        metadata=sanitize_activity_metadata(metadata),
     )
 
 
@@ -119,6 +121,17 @@ async def stream_chat_events(
         yield _sse(
             "activity",
             _activity(
+                event_type=ActivityEventType.ACCESS_SCOPE_BUILT,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.COMPLETED,
+                message="Trusted organization and role access scope established.",
+                node="access_scope",
+            ),
+        )
+        yield _sse(
+            "activity",
+            _activity(
                 event_type=ActivityEventType.RATE_LIMIT_CHECKED,
                 request_id=request_id,
                 conversation_id=conversation_id,
@@ -152,15 +165,23 @@ async def stream_chat_events(
             ),
         )
         transitions: asyncio.Queue[AgentTransition] = asyncio.Queue()
-        agent_task = asyncio.create_task(
-            orchestrator.run(
-                payload.message,
-                context,
-                transitions.put,
-                conversation.summary,
-                f"{context.identity.user_id}:{conversation_id}",
+        with tracing_context(
+            metadata={
+                "request_id": str(request_id),
+                "conversation_id": str(conversation_id),
+                "role": context.identity.role.value,
+                "agent_name": orchestrator.name,
+            }
+        ):
+            agent_task = asyncio.create_task(
+                orchestrator.run(
+                    payload.message,
+                    context,
+                    transitions.put,
+                    conversation.summary,
+                    f"{context.identity.user_id}:{conversation_id}",
+                )
             )
-        )
         try:
             async with asyncio.timeout(settings.request_timeout_seconds):
                 while not agent_task.done() or not transitions.empty():
@@ -206,7 +227,7 @@ async def stream_chat_events(
             yield _sse(
                 "activity",
                 _activity(
-                    event_type=ActivityEventType.VALIDATION_STARTED,
+                    event_type=ActivityEventType.VALIDATION_COMPLETED,
                     request_id=request_id,
                     conversation_id=conversation_id,
                     status=ActivityStatus.COMPLETED,

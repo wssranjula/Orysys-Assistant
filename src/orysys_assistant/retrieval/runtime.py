@@ -27,6 +27,7 @@ from orysys_assistant.tools.gateway import ToolGateway
 
 if TYPE_CHECKING:
     from orysys_assistant.agent.orchestrator import RootOrchestrator
+    from orysys_assistant.tools.mcp_client import EnterpriseClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +125,7 @@ def _service(
         dense_weight=settings.retrieval_dense_weight,
         sparse_weight=settings.retrieval_sparse_weight,
         candidate_count=settings.retrieval_candidate_count,
+        minimum_sparse_score=settings.retrieval_min_sparse_score,
     )
 
 
@@ -136,11 +138,13 @@ class AgentRuntimeManager:
         gateway: ToolGateway,
         memory_runtime: MemoryRuntime,
         project_root: Path | None = None,
+        enterprise_client: "EnterpriseClient | None" = None,
     ) -> None:
         self._settings = settings
         self._gateway = gateway
         self._memory_runtime = memory_runtime
         self._project_root = project_root
+        self._enterprise_client = enterprise_client
         self._lock = asyncio.Lock()
         self._runtime: RetrievalRuntime | None = None
         self._orchestrator: RootOrchestrator | None = None
@@ -173,7 +177,7 @@ class AgentRuntimeManager:
                     self._gateway.register(
                         python_analysis_spec(self._settings.analysis_max_records)
                     )
-                    enterprise_client = (
+                    enterprise_client = self._enterprise_client or (
                         InMemoryEnterpriseClient()
                         if self._settings.mcp_backend == "memory"
                         else MCPClientAdapter(
