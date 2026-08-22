@@ -12,6 +12,7 @@ scope are resolved server-side. These fields are forbidden in chat and tool payl
 
 | Method | Path | Success | Purpose |
 |---|---|---|---|
+| `POST` | `/v1/auth/token` | `200 application/json` | exchange a POC username/password for an opaque bearer token |
 | `POST` | `/v1/chat/stream` | `200 text/event-stream` | stream activity, answer deltas, and final response |
 | `GET` | `/v1/conversations/{id}` | `200 application/json` | load an owned conversation |
 | `POST` | `/v1/feedback` | `202 application/json` | attach rating to an owned response |
@@ -108,4 +109,3 @@ provider payloads, credentials, document content, and policy internals never lea
 | invalid citation | repair once, then return insufficient evidence |
 | unauthorized tool | emit denied activity; continue only if a safe path exists |
 | client disconnect | cancel graph, retrieval, and tool tasks |
-

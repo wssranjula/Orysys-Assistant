@@ -5,8 +5,9 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 1 complete — runnable end-to-end walking skeleton.** The agent is a
-> deterministic mock until retrieval and orchestration are introduced in later phases.
+> Current status: **Phase 2 complete — authenticated, role-scoped walking skeleton with shared
+> rate limiting.** The agent remains a deterministic mock until retrieval and orchestration are
+> introduced in later phases.
 
 ## POC scope
 
@@ -78,7 +79,8 @@ uv run mypy src
 
 Start the API and UI in separate terminals:
 
-```bash
+```powershell
+$env:RATE_LIMIT_BACKEND="memory" # local single-process development only
 uv run python -m uvicorn orysys_assistant.main:app --reload --port 8000
 uv run python -m streamlit run ui/app.py
 ```
@@ -91,6 +93,23 @@ Alternatively, start both services from a clean environment:
 ```bash
 docker compose up --build
 ```
+
+Compose starts Redis and uses the shared atomic token bucket. The memory backend is deliberately
+limited to tests and explicit single-process development.
+
+### Demo identities
+
+These credentials are fictional and exist only for the assessment POC:
+
+| Role | Username | Password |
+|---|---|---|
+| Viewer | `viewer@commercialbank.test` | `ViewerDemo!2026` |
+| Analyst | `analyst@commercialbank.test` | `AnalystDemo!2026` |
+| Administrator | `admin@commercialbank.test` | `AdminDemo!2026` |
+
+The application authentication records store salted PBKDF2 digests rather than these published
+demo passwords. Successful login returns an opaque bearer token whose identity and role are
+resolved only by the backend.
 
 Do not commit `.env` or secrets.
 
@@ -109,11 +128,23 @@ Tracing is disabled safely when no key/configuration is supplied.
 - A server-generated request ID is returned in `X-Request-ID` and propagated to events/logs.
 - Client disconnects cancel the stream. Errors use the common Phase 0 envelope.
 
+### Phase 2 security boundary
+
+- Every `/v1` resource except token issuance requires a bearer identity.
+- One authorization policy owns all role-to-capability decisions.
+- Organization, namespace, department, access levels, role, and user ID come from trusted
+  backend context and cannot be supplied through prompts or tool parameters.
+- All tool execution must pass through the typed gateway for allowlist, RBAC, reserved-field
+  rejection, schema validation, timeout, result-size limit, and audit logging.
+- Redis executes the per-user token bucket atomically, so limits are shared by API instances.
+- Authentication and rate-limit denials happen before the mock agent and return consistent
+  `401`, `403`, or `429` envelopes.
+
 ## Delivery roadmap
 
 1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
 2. Phase 1 — complete: FastAPI/Streamlit streaming walking skeleton
-3. Phase 2 — authentication, authorization, tool gateway, and Redis rate limiting
+3. Phase 2 — complete: authentication, authorization, tool gateway, and Redis rate limiting
 4. Phase 3 — sample corpus, ingestion, and hybrid Pinecone retrieval
 5. Phase 4 — root Deep Agent and specialized agents
 6. Phase 5 — bounded recursive LangGraph research workflow
