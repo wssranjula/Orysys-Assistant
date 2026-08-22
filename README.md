@@ -5,8 +5,8 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 5 complete — authenticated hybrid retrieval, controlled agent routing,
-> and a bounded recursive LangGraph research workflow.**
+> Current status: **Phase 6 complete — multi-turn conversation memory, durable LangGraph
+> checkpoints, controlled analysis, and read-only enterprise MCP tools are integrated.**
 
 ## POC scope
 
@@ -55,7 +55,7 @@ bounded LangGraph subgraph. See [docs/architecture.md](docs/architecture.md) and
 ```text
 src/orysys_assistant/  application package and deterministic domain contracts
 ui/                    Streamlit frontend (Phase 1)
-mcp_server/            read-only mock enterprise MCP server (Phase 7)
+mcp_server/            read-only mock enterprise MCP server
 skills/                four focused agent instruction packages
 data/                   sample documents and golden acceptance cases
 config/                 non-secret policy and execution defaults
@@ -93,8 +93,9 @@ Alternatively, start both services from a clean environment:
 docker compose up --build
 ```
 
-Compose starts Redis and uses the shared atomic token bucket. The memory backend is deliberately
-limited to tests and explicit single-process development.
+Compose starts PostgreSQL, Redis, the stateless MCP server, API, and UI. PostgreSQL stores
+owner-isolated conversation records and LangGraph checkpoints. The in-memory adapters are limited
+to tests and explicit single-process development.
 
 ### Demo identities
 
@@ -122,8 +123,8 @@ disabled safely when no key/configuration is supplied.
 
 - `POST /v1/chat/stream` emits separate `activity`, `answer_delta`, and terminal `final` events.
 - `GET /health/live` and `GET /health/ready` expose process health.
-- Conversation and feedback endpoints expose their frozen contracts but explicitly report that
-  persistence is unavailable until the memory phase.
+- Conversation endpoints expose owner-isolated persisted turns; feedback retains its placeholder
+  acknowledgement until a later phase.
 - A server-generated request ID is returned in `X-Request-ID` and propagated to events/logs.
 - Client disconnects cancel the stream. Errors use the common Phase 0 envelope.
 
@@ -192,6 +193,19 @@ fabricated complete answer. Research-node transitions are streamed to the existi
 and graph nodes plus workers appear in LangSmith. See
 [docs/research-graph.md](docs/research-graph.md).
 
+### Phase 6 memory and enterprise tools
+
+Each conversation is owned by the authenticated user and keyed by user plus conversation ID.
+Successful turns store recent user/assistant messages, a bounded summary, and evidence IDs—not full
+retrieved documents, credentials, raw MCP responses, or hidden reasoning. The Research LangGraph uses
+the same composite key for PostgreSQL-backed checkpoints with strict deserialization allowlists.
+
+The Analysis specialist now invokes a typed controlled tool supporting only `count_by`, `group_by`,
+`trend_by_date`, `top_values`, and `percentage`. The Enterprise specialist can invoke six read-only
+employee, service, and incident operations through an MCP adapter. Both remain behind role checks,
+schema validation, timeouts, response-size limits, audit logs, and visible tool activity. See
+[docs/memory-and-tools.md](docs/memory-and-tools.md).
+
 ## Delivery roadmap
 
 1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
@@ -200,7 +214,8 @@ and graph nodes plus workers appear in LangSmith. See
 4. Phase 3 — complete: sample corpus, ingestion, and hybrid Pinecone retrieval
 5. Phase 4 — complete: controlled root agent, three specialists, skills, and delegation traces
 6. Phase 5 — complete: bounded concurrent research graph with follow-up recursion
-7. Phase 6+ — memory, MCP/analysis tools, hardening, observability, and deployment
+7. Phase 6 — complete: owner-isolated memory, checkpoints, controlled analysis, and MCP tools
+8. Phase 7+ — guardrails, citation validation, hardening, observability, and deployment
 
 The original assessment is preserved in [assignment.md](assignment.md); the working plan is
 [lead_ai_assignment_phase_implementation_plan.md](lead_ai_assignment_phase_implementation_plan.md).

@@ -8,8 +8,8 @@ activity events and LangSmith traces.
 |---|---|---|---|
 | `direct_knowledge` | Root | `knowledge_search` | Focused questions answered from authorized evidence |
 | `research` | Research specialist | `knowledge_search` | Multi-document investigation and grounded findings |
-| `analysis` | Analysis specialist | `knowledge_search` | Deterministic aggregation over retrieved evidence |
-| `enterprise` | Enterprise-tool specialist | Three approved read-only enterprise tools | Ownership, directory, and incident-record lookups |
+| `analysis` | Analysis specialist | `knowledge_search`, `structured_analysis` | Bounded aggregation over retrieved evidence |
+| `enterprise` | Enterprise-tool specialist | Six approved read-only MCP tools | Ownership, directory, and incident-record lookups |
 
 Tool visibility is enforced by each agent's `ScopedToolbox`. Execution then passes through the
 single `ToolGateway`, which independently enforces registration, RBAC capability, server-owned
@@ -24,8 +24,9 @@ emit `subagent_started` and `subagent_completed`; direct retrieval emits retriev
 All specialist results validate through strict Pydantic contracts before the root converts them to
 the frozen API response and citation contracts.
 
-The Phase 4 analysis specialist performs a fixed count over authorized evidence in application code.
-The separately gateway-enforced controlled analysis tool is introduced in Phase 6.
+The Phase 6 Analysis specialist uses the separately gateway-enforced controlled analysis tool. It
+cannot execute arbitrary Python. The Enterprise specialist similarly reaches only six registered
+read-only MCP operations.
 
 The Research specialist owns the compiled, recursive, budgeted Phase 5 LangGraph described in
 [research-graph.md](research-graph.md). The root still delegates through the same small static agent
