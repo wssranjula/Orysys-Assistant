@@ -11,6 +11,7 @@ class IntentRouter:
     _enterprise_patterns = (
         r"\b(owner|ownership|employee directory|service catalogue|service catalog)\b",
         r"\b(who owns|on-call|contact for)\b",
+        r"\b(?:emp-[0-9]{3}|svc-[a-z]+-[0-9]{3}|inc-[0-9]{4}-[0-9]{3})\b",
     )
     _analysis_patterns = (
         r"\b(count|group|distribution|percentage|frequency|trend)\b",

@@ -15,11 +15,10 @@
 ### Deterministic control versus model autonomy
 
 The API uses deterministic intent routing and typed specialists for reproducibility, security, and
-offline assessment. A provider-backed Deep Agents factory is included and compiles with the same
-restricted tool surfaces, but the default request path does not require or invoke a hosted chat
-model. This makes every golden failure reproducible and keeps identity, authorization, scope,
-budgets, and validation out of model prompts. A production version would insert model synthesis
-behind these existing boundaries and evaluate model-specific groundedness.
+offline assessment. The same production LangGraph optionally invokes a provider-backed LangChain
+synthesis agent when configured; it does not maintain a second orchestration implementation.
+Offline mode remains deterministic, while identity, authorization, scope, budgets, citation
+resolution, and validation stay outside model prompts in both modes.
 
 ### Simplified RLM
 

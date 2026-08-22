@@ -1,8 +1,8 @@
 # Agent Orchestration (Phase 4)
 
-Phase 4 introduces one controlled root orchestrator and exactly three static specialists. The API
-uses deterministic intent classification so routing is reproducible, testable, and visible in SSE
-activity events and LangSmith traces.
+The production runtime is one compiled LangGraph with deterministic routing, four bounded branches,
+and a shared synthesis node. Routing remains reproducible and visible in SSE activity events and
+LangSmith traces.
 
 | Route | Agent | Available tools | Purpose |
 |---|---|---|---|
@@ -32,16 +32,18 @@ The Research specialist owns the compiled, recursive, budgeted Phase 5 LangGraph
 [research-graph.md](research-graph.md). The root still delegates through the same small static agent
 surface; recursion occurs only inside that code-controlled specialist workflow.
 
-## Deep Agents harness
+## Production graph and synthesis
 
-`build_deep_agent_graph` provides the provider-backed Deep Agents integration. Its OpenAI harness
-profile excludes built-in filesystem, search, edit, and shell execution tools, disables the default
-general-purpose subagent, exposes only gateway-backed tools, and mounts the four focused skills:
+`build_root_orchestrator` builds the only agent runtime used by the API. The outer graph contains
+`route`, `direct_knowledge`, `research`, `analysis`, `enterprise`, and `synthesize` nodes. It is
+compiled with the configured checkpointer, so message state is isolated by the server-derived
+user/conversation thread ID.
 
-- knowledge retrieval
-- incident analysis
-- enterprise tools
-- grounded response
+When `AGENT_SYNTHESIS_ENABLED=true` and `OPENAI_API_KEY` is configured, the synthesis node uses a
+LangChain agent with provider-backed structured output. The model receives only the bounded
+specialist result and authorized evidence. Citation resolution and output validation remain
+deterministic application controls. Without a key, the same graph uses the deterministic draft,
+which keeps offline development and evaluation reproducible.
 
-The factory compiles without making a model call. Production invocation still remains behind the
-same deterministic platform controls and trusted request context.
+Graph `custom` updates are streamed directly to SSE; callback-based transitions remain only as a
+compatibility surface for tests and external adapters.

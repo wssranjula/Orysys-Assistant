@@ -1,15 +1,19 @@
 """Compiled, bounded recursive research LangGraph."""
 
 import asyncio
+import operator
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 from uuid import uuid4
 
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Send
 from langsmith import traceable
 
 from orysys_assistant.agent.models import (
@@ -37,6 +41,8 @@ class ResearchState(TypedDict):
     filters: SearchFilters
     plan: ResearchPlan | None
     pending_tasks: list[ResearchTask]
+    task: ResearchTask | None
+    worker_results: Annotated[list[ResearchTaskResult], operator.add]
     completed_tasks: list[ResearchTaskResult]
     evidence: dict[str, Evidence]
     findings: list[Finding]
@@ -52,6 +58,7 @@ class ResearchState(TypedDict):
 class ResearchGraphContext:
     request_context: TrustedRequestContext
     transition_sink: TransitionSink | None = None
+    worker_semaphore: asyncio.Semaphore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +105,7 @@ class ResearchWorkflow:
         builder.add_node("normalize_scope", self._normalize_scope)
         builder.add_node("planner", self._planner)
         builder.add_node("workers", self._workers)
+        builder.add_node("worker", self._worker)
         builder.add_node("reducer", self._reducer)
         builder.add_node("coverage_check", self._coverage_check)
         builder.add_node("followup_planner", self._followup_planner)
@@ -105,7 +113,8 @@ class ResearchWorkflow:
         builder.add_edge(START, "normalize_scope")
         builder.add_edge("normalize_scope", "planner")
         builder.add_edge("planner", "workers")
-        builder.add_edge("workers", "reducer")
+        builder.add_conditional_edges("workers", self._dispatch_workers)
+        builder.add_edge("worker", "reducer")
         builder.add_edge("reducer", "coverage_check")
         builder.add_conditional_edges(
             "coverage_check",
@@ -130,6 +139,8 @@ class ResearchWorkflow:
             "filters": SearchFilters(),
             "plan": None,
             "pending_tasks": [],
+            "task": None,
+            "worker_results": [],
             "completed_tasks": [],
             "evidence": {},
             "findings": [],
@@ -149,7 +160,11 @@ class ResearchWorkflow:
                             "thread_id": thread_id or initial["request_id"],
                         }
                     },
-                    context=ResearchGraphContext(context, transition_sink),
+                    context=ResearchGraphContext(
+                        context,
+                        transition_sink,
+                        asyncio.Semaphore(self._limits.max_parallel_workers),
+                    ),
                 )
         except TimeoutError:
             return ResearchExecution(
@@ -208,20 +223,31 @@ class ResearchWorkflow:
         available = max(0, self._limits.max_total_tool_calls - state["tool_calls_used"])
         tasks = state["pending_tasks"][:available]
         await self._node_event(runtime, "workers", "started", {"task_count": len(tasks)})
-        semaphore = asyncio.Semaphore(self._limits.max_parallel_workers)
-        results = await asyncio.gather(
-            *(self._run_worker(task, runtime, semaphore) for task in tasks)
-        )
         warnings = list(state["warnings"])
         if len(tasks) < len(state["pending_tasks"]):
             warnings.append("Research tool-call budget prevented some tasks from running.")
-        await self._node_event(runtime, "workers", "completed", {"task_count": len(tasks)})
         return {
-            "pending_tasks": [],
-            "completed_tasks": [*state["completed_tasks"], *results],
-            "tool_calls_used": state["tool_calls_used"] + len(tasks),
+            "pending_tasks": tasks,
             "warnings": warnings,
         }
+
+    @staticmethod
+    def _dispatch_workers(state: ResearchState) -> list[Send] | Literal["reducer"]:
+        if not state["pending_tasks"]:
+            return "reducer"
+        return [Send("worker", {"task": task}) for task in state["pending_tasks"]]
+
+    async def _worker(
+        self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
+    ) -> dict[str, list[ResearchTaskResult]]:
+        task = state.get("task")
+        if task is None:
+            raise RuntimeError("A research worker was dispatched without a task.")
+        semaphore = runtime.context.worker_semaphore
+        if semaphore is None:
+            return {"worker_results": [await self._run_worker(task, runtime)]}
+        async with semaphore:
+            return {"worker_results": [await self._run_worker(task, runtime)]}
 
     @traceable(
         name="research-worker",
@@ -232,72 +258,71 @@ class ResearchWorkflow:
         self,
         task: ResearchTask,
         runtime: Runtime[ResearchGraphContext],
-        semaphore: asyncio.Semaphore,
     ) -> ResearchTaskResult:
-        async with semaphore:
-            await self._node_event(runtime, f"worker:{task.task_id}", "started")
-            worker_metadata: dict[str, Any] = {}
-            parameters: dict[str, Any] = {
-                "query": task.question,
-                "top_k": self._limits.max_chunks_per_worker,
-                **task.filters.model_dump(mode="json", exclude_none=True),
+        await self._node_event(runtime, f"worker:{task.task_id}", "started")
+        worker_metadata: dict[str, Any] = {}
+        parameters: dict[str, Any] = {
+            "query": task.question,
+            "top_k": self._limits.max_chunks_per_worker,
+            **task.filters.model_dump(mode="json", exclude_none=True),
+        }
+        try:
+            async with asyncio.timeout(self._limits.worker_timeout_seconds):
+                raw = await self._toolbox.execute(
+                    "knowledge_search", parameters, runtime.context.request_context
+                )
+            evidence = self._evidence_from_result(raw)
+            worker_metadata = {
+                "candidate_count": int(raw.get("candidate_count", len(evidence))),
+                "selected_evidence_count": len(evidence),
+                "retrieval_mode": str(raw.get("retrieval_mode", "hybrid")),
+                "retrieval_filters": task.filters.model_dump(mode="json", exclude_none=True),
+                "tool_name": "knowledge_search",
             }
-            try:
-                async with asyncio.timeout(self._limits.worker_timeout_seconds):
-                    raw = await self._toolbox.execute(
-                        "knowledge_search", parameters, runtime.context.request_context
-                    )
-                evidence = self._evidence_from_result(raw)
-                worker_metadata = {
-                    "candidate_count": int(raw.get("candidate_count", len(evidence))),
-                    "selected_evidence_count": len(evidence),
-                    "retrieval_mode": str(raw.get("retrieval_mode", "hybrid")),
-                    "retrieval_filters": task.filters.model_dump(mode="json", exclude_none=True),
-                    "tool_name": "knowledge_search",
-                }
-                findings = [
-                    Finding(claim=self._claim(item), evidence_ids=[item.evidence_id])
-                    for item in evidence
-                ]
-                result = ResearchTaskResult(
-                    task_id=task.task_id,
-                    status="completed",
-                    findings=findings,
-                    evidence=evidence,
-                    warning=None if evidence else "No authorized evidence matched this task.",
-                )
-            except TimeoutError:
-                result = ResearchTaskResult(
-                    task_id=task.task_id,
-                    status="failed",
-                    warning="Retrieval timed out.",
-                )
-            except Exception as exc:
-                result = ResearchTaskResult(
-                    task_id=task.task_id,
-                    status="failed",
-                    warning=f"Worker failed safely: {type(exc).__name__}.",
-                )
-            await self._node_event(
-                runtime,
-                f"worker:{task.task_id}",
-                "completed",
-                {
-                    "status": result.status,
-                    "evidence_count": len(result.evidence),
-                    **worker_metadata,
-                },
+            findings = [
+                Finding(claim=self._claim(item), evidence_ids=[item.evidence_id])
+                for item in evidence
+            ]
+            result = ResearchTaskResult(
+                task_id=task.task_id,
+                status="completed",
+                findings=findings,
+                evidence=evidence,
+                warning=None if evidence else "No authorized evidence matched this task.",
             )
-            return result
+        except TimeoutError:
+            result = ResearchTaskResult(
+                task_id=task.task_id,
+                status="failed",
+                warning="Retrieval timed out.",
+            )
+        except Exception as exc:
+            result = ResearchTaskResult(
+                task_id=task.task_id,
+                status="failed",
+                warning=f"Worker failed safely: {type(exc).__name__}.",
+            )
+        await self._node_event(
+            runtime,
+            f"worker:{task.task_id}",
+            "completed",
+            {
+                "status": result.status,
+                "evidence_count": len(result.evidence),
+                **worker_metadata,
+            },
+        )
+        return result
 
     async def _reducer(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
     ) -> dict[str, Any]:
         await self._node_event(runtime, "reducer", "started")
+        completed_tasks = state["worker_results"]
         evidence = dict(state["evidence"])
         claims: dict[str, Finding] = {}
         warnings = list(state["warnings"])
-        for result in state["completed_tasks"]:
+        for result in completed_tasks:
             if result.warning and result.warning not in warnings:
                 warnings.append(result.warning)
             for item in result.evidence:
@@ -322,7 +347,17 @@ class ResearchWorkflow:
             "completed",
             {"evidence_count": len(evidence), "finding_count": len(findings)},
         )
-        return {"evidence": evidence, "findings": findings, "warnings": warnings}
+        await self._node_event(
+            runtime, "workers", "completed", {"task_count": len(state["pending_tasks"])}
+        )
+        return {
+            "pending_tasks": [],
+            "completed_tasks": completed_tasks,
+            "tool_calls_used": len(completed_tasks),
+            "evidence": evidence,
+            "findings": findings,
+            "warnings": warnings,
+        }
 
     async def _coverage_check(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
@@ -485,15 +520,16 @@ class ResearchWorkflow:
         status: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        transition = AgentTransition(
+            event_type=f"research_node_{status}",
+            agent="research_subagent",
+            node=node,
+            status=status,
+            message=f"Research node {node.replace('_', ' ')} {status}.",
+            metadata=metadata or {},
+        )
+        with suppress(RuntimeError):
+            get_stream_writer()(transition.model_dump(mode="json"))
         sink = runtime.context.transition_sink
         if sink is not None:
-            await sink(
-                AgentTransition(
-                    event_type=f"research_node_{status}",
-                    agent="research_subagent",
-                    node=node,
-                    status=status,
-                    message=f"Research node {node.replace('_', ' ')} {status}.",
-                    metadata=metadata or {},
-                )
-            )
+            await sink(transition)

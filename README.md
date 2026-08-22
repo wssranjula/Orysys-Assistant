@@ -1,8 +1,8 @@
 # Commercial Bank AI Assistant
 
 An enterprise AI-assistant proof of concept for evidence-grounded answers over internal
-knowledge. The target system combines a FastAPI/Streamlit interface, a controlled Deep Agent
-harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
+knowledge. The target system combines a FastAPI/Streamlit interface, one controlled production
+LangGraph, a bounded research subgraph, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
 > Current status: **Phase 8 complete — the safe real-time activity panel, correlated trace tree,
@@ -63,7 +63,6 @@ bounded LangGraph subgraph. See [docs/architecture.md](docs/architecture.md) and
 src/orysys_assistant/  application package and deterministic domain contracts
 ui/                    Streamlit frontend (Phase 1)
 mcp_server/            read-only mock enterprise MCP server
-skills/                four focused agent instruction packages
 data/                   sample documents and golden acceptance cases
 config/                 non-secret policy and execution defaults
 tests/                  unit, graph, integration, and end-to-end suites
@@ -208,20 +207,20 @@ the configured 0.65/0.35 weights, and returns attributed evidence. See
 
 ### Phase 4 agent orchestration
 
-The API now uses a deterministic, auditable intent router in front of one root orchestrator.
+The API now uses one compiled, auditable LangGraph with a deterministic routing node.
 Focused questions use authorized knowledge search directly; multi-document research, structured
 analysis, and enterprise lookups delegate to exactly three static specialists. Every specialist
 has a small code-enforced tool allowlist, while the central gateway continues to enforce RBAC,
 trusted scope, schemas, timeouts, and audit logging.
 
-A provider-backed Deep Agents graph factory is also included with default filesystem and shell
-tools excluded, the general-purpose subagent disabled, three declarative specialists, and the four
-skills under `skills/`. See [docs/agents.md](docs/agents.md).
+The four bounded branches converge on one synthesis node. With an OpenAI key, that node uses
+LangChain structured output to produce grounded prose; offline mode retains deterministic synthesis.
+There is no second, unused agent harness. See [docs/agents.md](docs/agents.md).
 
 ### Phase 5 bounded research workflow
 
 Complex research requests now enter a compiled LangGraph subgraph. It normalizes trusted scope,
-creates up to four independent tasks, runs retrieval workers concurrently through the Tool Gateway,
+creates up to four independent tasks, fans workers out with LangGraph `Send` through the Tool Gateway,
 deduplicates evidence and claims, checks coverage, and performs at most two bounded follow-up rounds.
 Code-enforced limits cover parallel workers, recursion depth, total tool calls, evidence per worker,
 worker deadlines, and the overall deadline.
@@ -235,9 +234,10 @@ and graph nodes plus workers appear in LangSmith. See
 ### Phase 6 memory and enterprise tools
 
 Each conversation is owned by the authenticated user and keyed by user plus conversation ID.
-Successful turns store recent user/assistant messages, a bounded summary, and evidence IDs—not full
-retrieved documents, credentials, raw MCP responses, or hidden reasoning. The Research LangGraph uses
-the same composite key for PostgreSQL-backed checkpoints with strict deserialization allowlists.
+The root LangGraph checkpointer owns execution-time message history using the server-derived user and
+conversation ID. The owner-isolated conversation repository remains a compact API read model with
+recent messages, a bounded display summary, and evidence IDs—not full retrieved documents,
+credentials, raw MCP responses, or hidden reasoning.
 
 The Analysis specialist now invokes a typed controlled tool supporting only `count_by`, `group_by`,
 `trend_by_date`, `top_values`, and `percentage`. The Enterprise specialist can invoke six read-only

@@ -6,10 +6,9 @@ Research specialist's `knowledge_search` toolbox, which then crosses the central
 trusted access-scope enforcement.
 
 ```text
-START → normalize_scope → planner → workers → reducer → coverage_check
-                                                        ├─ sufficient/limited → finalize → END
-                                                        └─ gap + budget → followup_planner ─┐
-                                                                                           └→ workers
+START → normalize_scope → planner → workers → Send(worker × N) → reducer → coverage_check
+                                                                         ├─ sufficient/limited → finalize → END
+                                                                         └─ gap + budget → followup_planner → workers
 ```
 
 ## Nodes
@@ -17,8 +16,8 @@ START → normalize_scope → planner → workers → reducer → coverage_check
 - `normalize_scope` removes redundant whitespace and derives only explicit safe filters.
 - `planner` creates at most four independent tasks. Annual incident questions are partitioned by
   quarter; other questions are partitioned by evidence type.
-- `workers` uses `asyncio.gather` behind a semaphore. Each worker has its own timeout and returns a
-  strict `ResearchTaskResult`, including a safe failure warning when retrieval fails.
+- `workers` emits LangGraph `Send` commands for native map/reduce fan-out. Each worker has its own
+  timeout and returns a strict reducer update, including a safe failure warning when retrieval fails.
 - `reducer` deduplicates evidence by evidence ID and findings by normalized claim, preserving all
   supporting evidence IDs.
 - `coverage_check` assesses unique evidence and successful task coverage.

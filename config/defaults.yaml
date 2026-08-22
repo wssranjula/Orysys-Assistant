@@ -3,6 +3,10 @@ api:
   max_response_characters: 20000
   request_timeout_seconds: 120
 
+agent:
+  model: gpt-5-mini
+  synthesis_enabled: true
+
 rate_limits:
   viewer:
     capacity: 10

@@ -1,6 +1,6 @@
 # ADR 001: Deep Agent with a bounded research subgraph
 
-- Status: Accepted
+- Status: Superseded by ADR 007
 - Date: 2026-08-22
 
 ## Context
@@ -20,4 +20,3 @@ enforces all recursion, concurrency, tool-call, and timeout budgets.
 The topology and failure boundaries are observable and testable, and worker contexts stay
 small. There is additional integration code, and the root agent cannot dynamically create
 unrestricted agents or tools.
-
