@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     retrieval_sparse_weight: float = Field(default=0.35, ge=0, le=1)
     retrieval_candidate_count: int = Field(default=20, gt=0, le=100)
     retrieval_final_count: int = Field(default=6, gt=0, le=20)
+    retrieval_retry_attempts: int = Field(default=2, ge=0, le=3)
     research_max_initial_tasks: int = Field(default=4, gt=0, le=8)
     research_max_followup_tasks: int = Field(default=2, ge=0, le=4)
     research_max_recursion_depth: int = Field(default=2, ge=0, le=4)
@@ -53,6 +54,9 @@ class Settings(BaseSettings):
     mcp_server_url: str = "http://localhost:8100/mcp"
     mcp_timeout_seconds: float = Field(default=10, gt=0, le=60)
     mcp_max_result_bytes: int = Field(default=100_000, gt=0, le=1_000_000)
+    mcp_retry_attempts: int = Field(default=1, ge=0, le=2)
+    llm_retry_attempts: int = Field(default=1, ge=0, le=2)
+    request_timeout_seconds: float = Field(default=120, gt=0, le=300)
     redis_url: str = "redis://localhost:6379/0"
     rate_limit_backend: str = "redis"
     rate_limit_viewer_capacity: int = Field(default=10, gt=0)

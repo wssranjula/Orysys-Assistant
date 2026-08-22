@@ -56,7 +56,10 @@ class EnterpriseToolHandler:
 
 
 def enterprise_tool_specs(
-    client: EnterpriseClient, timeout_seconds: float, max_result_bytes: int
+    client: EnterpriseClient,
+    timeout_seconds: float,
+    max_result_bytes: int,
+    retry_attempts: int = 1,
 ) -> list[ToolSpec]:
     schemas: tuple[tuple[str, type[BaseModel]], ...] = (
         ("get_employee", GetEmployeeInput),
@@ -74,6 +77,7 @@ def enterprise_tool_specs(
             handler=EnterpriseToolHandler(client, name),
             timeout_seconds=timeout_seconds,
             max_result_bytes=max_result_bytes,
+            retry_attempts=retry_attempts,
         )
         for name, input_model in schemas
     ]

@@ -39,6 +39,7 @@ class ToolSpec:
     handler: ToolHandler
     timeout_seconds: float = 10
     max_result_bytes: int = 100_000
+    retry_attempts: int = 0
 
 
 class ToolGateway:
@@ -109,18 +110,23 @@ class ToolGateway:
             tool=tool_name,
             result="started",
         )
-        try:
-            async with asyncio.timeout(spec.timeout_seconds):
-                result = await spec.handler(validated, context)
-        except TimeoutError as exc:
-            logger.warning(
-                "tool_execution_completed",
-                user_id=context.identity.user_id,
-                role=context.identity.role.value,
-                tool=tool_name,
-                result="timeout",
-            )
-            raise ToolTimeoutError("The tool did not respond before its deadline.") from exc
+        for attempt in range(spec.retry_attempts + 1):
+            try:
+                async with asyncio.timeout(spec.timeout_seconds):
+                    result = await spec.handler(validated, context)
+                break
+            except TimeoutError as exc:
+                if attempt < spec.retry_attempts:
+                    await asyncio.sleep(0.25 * (2**attempt))
+                    continue
+                logger.warning(
+                    "tool_execution_completed",
+                    user_id=context.identity.user_id,
+                    role=context.identity.role.value,
+                    tool=tool_name,
+                    result="timeout",
+                )
+                raise ToolTimeoutError("The tool did not respond before its deadline.") from exc
 
         result_size = len(json.dumps(result, default=str).encode("utf-8"))
         if result_size > spec.max_result_bytes:

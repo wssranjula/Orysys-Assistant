@@ -5,6 +5,9 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orysys_assistant.domain.errors import RetrievalUnavailableError
+from orysys_assistant.guardrails.content import RetrievedContentGuard
+from orysys_assistant.guardrails.retry import retry_async
 from orysys_assistant.retrieval.models import SearchFilters
 from orysys_assistant.retrieval.service import RetrievalService
 from orysys_assistant.security.authorization import Capability
@@ -24,8 +27,10 @@ class KnowledgeSearchInput(BaseModel):
 
 
 class KnowledgeSearchTool:
-    def __init__(self, retrieval: RetrievalService) -> None:
+    def __init__(self, retrieval: RetrievalService, retries: int = 1) -> None:
         self._retrieval = retrieval
+        self._retries = retries
+        self._content_guard = RetrievedContentGuard()
 
     async def __call__(
         self,
@@ -33,25 +38,36 @@ class KnowledgeSearchTool:
         context: TrustedRequestContext,
     ) -> dict[str, Any]:
         request = cast(KnowledgeSearchInput, parameters)
-        evidence = await self._retrieval.search(
-            request.query,
-            context.access_scope,
-            SearchFilters(
-                department=request.department,
-                document_type=request.document_type,
-                created_after=request.created_after,
-                created_before=request.created_before,
-            ),
-            top_k=request.top_k,
+        filters = SearchFilters(
+            department=request.department,
+            document_type=request.document_type,
+            created_after=request.created_after,
+            created_before=request.created_before,
         )
-        return {"evidence": [item.model_dump(mode="json") for item in evidence]}
+        evidence = await retry_async(
+            lambda: self._retrieval.search(
+                request.query, context.access_scope, filters, top_k=request.top_k
+            ),
+            retries=self._retries,
+            retry_on=(RetrievalUnavailableError, OSError, TimeoutError),
+        )
+        evidence = self._content_guard.protect(evidence)
+        warnings: list[str] = []
+        if any(item.metadata.get("retrieval_degraded") for item in evidence):
+            warnings.append("Sparse retrieval was unavailable; dense-only evidence was used.")
+        if any(item.metadata.get("prompt_injection_flagged") for item in evidence):
+            warnings.append("Suspicious instructions in retrieved content were quarantined.")
+        return {
+            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "warnings": warnings,
+        }
 
 
-def knowledge_search_spec(retrieval: RetrievalService) -> ToolSpec:
+def knowledge_search_spec(retrieval: RetrievalService, retries: int = 1) -> ToolSpec:
     return ToolSpec(
         name="knowledge_search",
         capability=Capability.KNOWLEDGE_SEARCH,
         input_model=KnowledgeSearchInput,
-        handler=KnowledgeSearchTool(retrieval),
+        handler=KnowledgeSearchTool(retrieval, retries),
         timeout_seconds=15,
     )

@@ -9,6 +9,8 @@ from orysys_assistant.api.error_handlers import register_error_handlers
 from orysys_assistant.api.middleware import RequestContextMiddleware
 from orysys_assistant.api.routes import auth, chat, conversations, feedback, health
 from orysys_assistant.config import Settings, get_settings
+from orysys_assistant.guardrails.input import InputGuard
+from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.memory.runtime import MemoryRuntime
 from orysys_assistant.observability.logging import configure_logging, get_logger
 from orysys_assistant.retrieval.runtime import AgentRuntimeManager
@@ -61,6 +63,8 @@ def create_app(
     app.state.tool_gateway = tool_gateway
     app.state.agent_runtime = agent_runtime
     app.state.memory_runtime = memory_runtime
+    app.state.input_guard = InputGuard()
+    app.state.output_validator = OutputValidator()
     app.add_middleware(RequestContextMiddleware)
     register_error_handlers(app)
     app.include_router(health.router)

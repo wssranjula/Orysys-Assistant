@@ -23,6 +23,7 @@ from orysys_assistant.agent.models import (
 )
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
+from orysys_assistant.guardrails.content import unwrap_evidence
 from orysys_assistant.retrieval.models import Evidence, SearchFilters
 from orysys_assistant.security.models import AccessScope, TrustedRequestContext
 
@@ -427,7 +428,7 @@ class ResearchWorkflow:
 
     @staticmethod
     def _claim(evidence: Evidence) -> str:
-        compact = " ".join(evidence.content.split())
+        compact = " ".join(unwrap_evidence(evidence.content).split())
         sentences = re.split(r"(?<=[.!?])\s+", compact)
         selected = next(
             (

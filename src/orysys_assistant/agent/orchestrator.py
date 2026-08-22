@@ -21,6 +21,7 @@ from orysys_assistant.agent.subagents import (
 )
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.domain.models import Citation, ResponseStatus
+from orysys_assistant.guardrails.content import unwrap_evidence
 from orysys_assistant.retrieval.models import Evidence
 from orysys_assistant.security.models import TrustedRequestContext
 
@@ -103,13 +104,22 @@ class RootOrchestrator:
             "knowledge_search", {"query": question, "top_k": 6}, context
         )
         evidence = [Evidence.model_validate(item) for item in result["evidence"]]
+        warnings = [str(item) for item in result.get("warnings", [])]
         await self._retrieval_transition(sink, "completed", len(evidence))
         return AgentExecutionResult(
             route=AgentRoute.DIRECT_KNOWLEDGE,
             answer=self._evidence_answer(evidence),
+            status=(
+                ResponseStatus.PARTIAL
+                if any("dense-only" in warning for warning in warnings)
+                else ResponseStatus.COMPLETE
+            ),
             citations=self._citations(evidence),
-            warnings=[] if evidence else ["No relevant authorized evidence was found."],
+            warnings=warnings
+            if evidence
+            else [*warnings, "No relevant authorized evidence was found."],
             evidence_ids=[item.evidence_id for item in evidence],
+            evidence=evidence,
         )
 
     async def _delegate_research(
@@ -144,6 +154,30 @@ class RootOrchestrator:
         await self._subagent_transition(sink, self._enterprise.name, "started")
         execution = await self._enterprise.run(question, context, sink)
         await self._subagent_transition(sink, self._enterprise.name, "completed")
+        if not execution.result.data:
+            await self._retrieval_transition(sink, "started", 0)
+            fallback = await self._direct_toolbox.execute(
+                "knowledge_search", {"query": question, "top_k": 6}, context
+            )
+            evidence = [Evidence.model_validate(item) for item in fallback["evidence"]]
+            await self._retrieval_transition(sink, "completed", len(evidence))
+            if evidence:
+                return AgentExecutionResult(
+                    route=AgentRoute.DIRECT_KNOWLEDGE,
+                    answer=(
+                        "Enterprise data was unavailable. I found these authorized documents:\n"
+                        + "\n".join(
+                            f"- {item.title}: "
+                            f"{_first_sentence(unwrap_evidence(item.content))} [{index}]"
+                            for index, item in enumerate(evidence, start=1)
+                        )
+                    ),
+                    status=ResponseStatus.PARTIAL,
+                    citations=self._citations(evidence),
+                    warnings=execution.result.warnings,
+                    evidence_ids=[item.evidence_id for item in evidence],
+                    evidence=evidence,
+                )
         return self._enterprise_response(execution)
 
     @staticmethod
@@ -190,7 +224,9 @@ class RootOrchestrator:
             return "I could not find authorized evidence that answers this question."
         lines = ["I found the following relevant Commercial Bank evidence:"]
         for index, item in enumerate(evidence, start=1):
-            lines.append(f"- {item.title}: {_first_sentence(item.content)} [{index}]")
+            lines.append(
+                f"- {item.title}: {_first_sentence(unwrap_evidence(item.content))} [{index}]"
+            )
         return "\n".join(lines)
 
     @classmethod
@@ -207,6 +243,7 @@ class RootOrchestrator:
             citations=cls._citations(execution.evidence),
             warnings=execution.result.warnings,
             evidence_ids=execution.result.evidence_ids,
+            evidence=execution.evidence,
         )
 
     @classmethod
@@ -225,6 +262,7 @@ class RootOrchestrator:
             citations=cls._citations(execution.evidence),
             warnings=execution.result.warnings,
             evidence_ids=[item.evidence_id for item in execution.evidence],
+            evidence=execution.evidence,
         )
 
     @staticmethod
@@ -238,6 +276,13 @@ class RootOrchestrator:
         return AgentExecutionResult(
             route=AgentRoute.ENTERPRISE,
             answer=answer,
+            status=(
+                ResponseStatus.PARTIAL
+                if result.data and result.warnings
+                else ResponseStatus.INSUFFICIENT_EVIDENCE
+                if not result.data
+                else ResponseStatus.COMPLETE
+            ),
             warnings=result.warnings,
         )
 

@@ -14,6 +14,7 @@ from orysys_assistant.domain.errors import (
     RateLimitError,
     RateLimitUnavailableError,
 )
+from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.memory.repository import ConversationRepository
 from orysys_assistant.memory.runtime import MemoryRuntime
 from orysys_assistant.observability.logging import get_logger
@@ -33,6 +34,13 @@ def get_request_settings(request: Request) -> Settings:
 
 
 SettingsDependency = Annotated[Settings, Depends(get_request_settings)]
+
+
+def get_output_validator(request: Request) -> OutputValidator:
+    return cast(OutputValidator, request.app.state.output_validator)
+
+
+OutputValidatorDependency = Annotated[OutputValidator, Depends(get_output_validator)]
 
 
 def get_authentication_service(request: Request) -> AuthenticationService:

@@ -2,10 +2,11 @@
 
 import asyncio
 import hashlib
-from typing import Any
+from typing import Any, cast
 
 from langsmith import traceable
 
+from orysys_assistant.domain.errors import RetrievalUnavailableError
 from orysys_assistant.retrieval.embeddings import EmbeddingProvider
 from orysys_assistant.retrieval.models import Evidence, SearchFilters, SearchMatch
 from orysys_assistant.retrieval.sparse_encoding import BM25SparseEncoder
@@ -54,9 +55,14 @@ class RetrievalService:
     ) -> list[Evidence]:
         filters = filters or SearchFilters()
         metadata_filter = self._metadata_filter(access_scope, filters)
-        dense_vector = (await self._embeddings.embed_texts([query]))[0]
+        try:
+            dense_vector = (await self._embeddings.embed_texts([query]))[0]
+        except Exception as exc:
+            raise RetrievalUnavailableError(
+                "The retrieval service is temporarily unavailable."
+            ) from exc
         sparse_vector = self._sparse_encoder.encode_query(query)
-        dense_matches, sparse_matches = await asyncio.gather(
+        dense_result, sparse_result = await asyncio.gather(
             self._vector_store.query_dense(
                 access_scope.namespace,
                 dense_vector,
@@ -69,8 +75,30 @@ class RetrievalService:
                 metadata_filter,
                 self._candidate_count,
             ),
+            return_exceptions=True,
         )
-        return self._combine(dense_matches, sparse_matches, top_k)
+        if isinstance(dense_result, BaseException):
+            raise RetrievalUnavailableError(
+                "The retrieval service is temporarily unavailable."
+            ) from dense_result
+        sparse_degraded = isinstance(sparse_result, BaseException)
+        dense_matches = dense_result
+        sparse_matches = [] if sparse_degraded else cast(list[SearchMatch], sparse_result)
+        evidence = self._combine(dense_matches, sparse_matches, top_k)
+        if sparse_degraded:
+            evidence = [
+                item.model_copy(
+                    update={
+                        "metadata": {
+                            **item.metadata,
+                            "retrieval_mode": "dense_only",
+                            "retrieval_degraded": True,
+                        }
+                    }
+                )
+                for item in evidence
+            ]
+        return evidence
 
     @staticmethod
     def _metadata_filter(

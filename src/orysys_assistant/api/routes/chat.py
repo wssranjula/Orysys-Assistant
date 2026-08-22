@@ -5,6 +5,7 @@ import json
 import re
 from collections.abc import AsyncIterator
 from time import perf_counter
+from typing import cast
 from uuid import UUID, uuid4
 
 import structlog
@@ -15,11 +16,18 @@ from orysys_assistant.agent.models import AgentTransition
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.api.dependencies import (
     ConversationRepositoryDependency,
+    OutputValidatorDependency,
     RootOrchestratorDependency,
     SettingsDependency,
     TrustedChatContextDependency,
 )
 from orysys_assistant.config import Settings
+from orysys_assistant.domain.errors import (
+    ApplicationError,
+    AuthorizationError,
+    RetrievalUnavailableError,
+    ToolTimeoutError,
+)
 from orysys_assistant.domain.models import (
     ActivityEvent,
     ActivityEventType,
@@ -29,6 +37,8 @@ from orysys_assistant.domain.models import (
     FinalResponse,
     ResponseStatus,
 )
+from orysys_assistant.guardrails.input import InputGuard
+from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.memory.models import ConversationRecord
 from orysys_assistant.memory.repository import ConversationRepository
 from orysys_assistant.observability.logging import get_logger
@@ -82,6 +92,7 @@ async def stream_chat_events(
     orchestrator: RootOrchestrator,
     repository: ConversationRepository,
     conversation: ConversationRecord,
+    output_validator: OutputValidator | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     request_id: UUID = request.state.request_id
     conversation_id = conversation.conversation_id
@@ -151,31 +162,72 @@ async def stream_chat_events(
             )
         )
         try:
-            while not agent_task.done() or not transitions.empty():
-                await _ensure_connected(request)
-                try:
-                    transition = await asyncio.wait_for(transitions.get(), timeout=0.05)
-                except TimeoutError:
-                    continue
-                yield _sse(
-                    "activity",
-                    _activity(
-                        event_type=ActivityEventType(transition.event_type),
-                        request_id=request_id,
-                        conversation_id=conversation_id,
-                        status=ActivityStatus(transition.status),
-                        message=transition.message,
-                        agent=transition.agent,
-                        node=transition.node,
-                        metadata=transition.metadata,
-                    ),
-                )
-            result = await agent_task
+            async with asyncio.timeout(settings.request_timeout_seconds):
+                while not agent_task.done() or not transitions.empty():
+                    await _ensure_connected(request)
+                    try:
+                        transition = await asyncio.wait_for(transitions.get(), timeout=0.05)
+                    except TimeoutError:
+                        continue
+                    yield _sse(
+                        "activity",
+                        _activity(
+                            event_type=ActivityEventType(transition.event_type),
+                            request_id=request_id,
+                            conversation_id=conversation_id,
+                            status=ActivityStatus(transition.status),
+                            message=transition.message,
+                            agent=transition.agent,
+                            node=transition.node,
+                            metadata=transition.metadata,
+                        ),
+                    )
+                result = await agent_task
         except BaseException:
             if not agent_task.done():
                 agent_task.cancel()
             await asyncio.gather(agent_task, return_exceptions=True)
             raise
+
+        yield _sse(
+            "activity",
+            _activity(
+                event_type=ActivityEventType.VALIDATION_STARTED,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.STARTED,
+                message="Validating grounding, citations, and response policy.",
+                node="output_validation",
+            ),
+        )
+        validation = (output_validator or OutputValidator()).validate(result, context.access_scope)
+        result = validation.result
+        if validation.valid:
+            yield _sse(
+                "activity",
+                _activity(
+                    event_type=ActivityEventType.VALIDATION_STARTED,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    status=ActivityStatus.COMPLETED,
+                    message="Grounding and response contracts validated.",
+                    node="output_validation",
+                    metadata={"repaired": validation.repaired},
+                ),
+            )
+        else:
+            yield _sse(
+                "activity",
+                _activity(
+                    event_type=ActivityEventType.VALIDATION_FAILED,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    status=ActivityStatus.DEGRADED,
+                    message="Response validation failed; returning insufficient evidence.",
+                    node="output_validation",
+                    metadata={"repair_attempted": validation.repaired},
+                ),
+            )
 
         conversation = await repository.append_turn(
             conversation_id,
@@ -224,17 +276,6 @@ async def stream_chat_events(
             if settings.mock_token_delay_seconds:
                 await asyncio.sleep(settings.mock_token_delay_seconds)
 
-        yield _sse(
-            "activity",
-            _activity(
-                event_type=ActivityEventType.VALIDATION_STARTED,
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=ActivityStatus.COMPLETED,
-                message="Structured agent response contract validated.",
-                node="output_validation",
-            ),
-        )
         duration_ms = round((perf_counter() - started) * 1_000, 2)
         yield _sse(
             "activity",
@@ -257,6 +298,7 @@ async def stream_chat_events(
                 answer=result.answer,
                 citations=result.citations,
                 warnings=result.warnings,
+                degraded=result.status is not ResponseStatus.COMPLETE,
             ),
         )
         logger.info("chat_stream_completed", duration_ms=duration_ms, result="complete")
@@ -274,6 +316,58 @@ async def stream_chat_events(
             result="task_cancelled",
         )
         raise
+    except (AuthorizationError, RetrievalUnavailableError, ToolTimeoutError, TimeoutError) as exc:
+        logger.warning(
+            "chat_stream_degraded", error_type=type(exc).__name__, result="insufficient_evidence"
+        )
+        yield _sse(
+            "activity",
+            _activity(
+                event_type=ActivityEventType.REQUEST_FAILED,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.DEGRADED,
+                message="A required authorized dependency was unavailable.",
+                node="request_exit",
+                metadata={"error_code": getattr(exc, "code", "execution_timeout")},
+            ),
+        )
+        yield _sse(
+            "final",
+            FinalResponse(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ResponseStatus.INSUFFICIENT_EVIDENCE,
+                answer="I could not verify an answer from the authorized sources available.",
+                warnings=["A required source or permission was unavailable."],
+                degraded=True,
+            ),
+        )
+    except ApplicationError as exc:
+        logger.warning("chat_stream_failed", error_type=type(exc).__name__, result=exc.code)
+        yield _sse(
+            "activity",
+            _activity(
+                event_type=ActivityEventType.REQUEST_FAILED,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.FAILED,
+                message="The request could not be completed safely.",
+                node="request_exit",
+                metadata={"error_code": exc.code},
+            ),
+        )
+        yield _sse(
+            "final",
+            FinalResponse(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ResponseStatus.FAILED,
+                answer="The request could not be completed safely.",
+                warnings=[exc.message],
+                degraded=True,
+            ),
+        )
     except Exception as exc:
         logger.exception("chat_stream_failed", error_type=type(exc).__name__, result="failed")
         failure = _activity(
@@ -306,13 +400,23 @@ async def stream_chat(
     context: TrustedChatContextDependency,
     orchestrator: RootOrchestratorDependency,
     repository: ConversationRepositoryDependency,
+    output_validator: OutputValidatorDependency,
 ) -> EventSourceResponse:
+    input_guard = cast(InputGuard, request.app.state.input_guard)
+    input_guard.validate(payload)
     conversation = await repository.get_or_create(
         payload.conversation_id or uuid4(), context.identity.user_id
     )
     return EventSourceResponse(
         stream_chat_events(
-            request, payload, settings, context, orchestrator, repository, conversation
+            request,
+            payload,
+            settings,
+            context,
+            orchestrator,
+            repository,
+            conversation,
+            output_validator,
         ),
         ping=15,
         headers={

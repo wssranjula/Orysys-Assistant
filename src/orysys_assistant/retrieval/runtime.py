@@ -165,7 +165,11 @@ class AgentRuntimeManager:
                     self._runtime = await build_retrieval_runtime(
                         self._settings, self._project_root
                     )
-                    self._gateway.register(knowledge_search_spec(self._runtime.service))
+                    self._gateway.register(
+                        knowledge_search_spec(
+                            self._runtime.service, self._settings.retrieval_retry_attempts
+                        )
+                    )
                     self._gateway.register(
                         python_analysis_spec(self._settings.analysis_max_records)
                     )
@@ -181,6 +185,7 @@ class AgentRuntimeManager:
                         enterprise_client,
                         self._settings.mcp_timeout_seconds,
                         self._settings.mcp_max_result_bytes,
+                        self._settings.mcp_retry_attempts,
                     ):
                         self._gateway.register(spec)
                     self._orchestrator = build_root_orchestrator(
