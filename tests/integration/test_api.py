@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute
+from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.models import Citation
 from orysys_assistant.main import create_app
@@ -38,6 +38,35 @@ class FakeOrchestrator:
         self.calls += 1
         self.summaries.append(conversation_summary)
         self.thread_ids.append(thread_id)
+        if transition_sink is not None:
+            await transition_sink(
+                AgentTransition(
+                    event_type="routing_completed",
+                    agent=self.name,
+                    node="intent_routing",
+                    status="completed",
+                    message="Selected direct knowledge route.",
+                    metadata={
+                        "route": "direct_knowledge",
+                        "plan_summary": "Search authorized evidence and validate citations.",
+                        "raw_mcp_response": {"secret": "must not leave API"},
+                    },
+                )
+            )
+            await transition_sink(
+                AgentTransition(
+                    event_type="retrieval_completed",
+                    agent=self.name,
+                    node="knowledge_search",
+                    status="completed",
+                    message="Retrieved fixture evidence.",
+                    metadata={
+                        "candidate_count": 4,
+                        "selected_evidence_count": 1,
+                        "retrieval_mode": "hybrid",
+                    },
+                )
+            )
         evidence = Evidence(
             evidence_id="ev_test_policy",
             document_id="policy-test-001",
@@ -335,3 +364,65 @@ async def test_fabricated_citation_is_not_streamed_or_persisted(
         f"/v1/conversations/{final['conversation_id']}", headers=auth_headers()
     )
     assert "fabricated policy" not in json.dumps(snapshot.json()).lower()
+
+
+@pytest.mark.asyncio
+async def test_activity_stream_has_one_trace_and_allowlisted_metadata(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/chat/stream",
+        json={"message": "Show observable policy retrieval"},
+        headers=auth_headers(),
+    )
+    events = parse_sse(response.text)
+    activity = [payload for name, payload in events if name == "activity"]
+    final = events[-1][1]
+
+    assert {event["request_id"] for event in activity} == {final["request_id"]}
+    assert any(event["event_type"] == "access_scope_built" for event in activity)
+    routing = next(event for event in activity if event["event_type"] == "routing_completed")
+    retrieval = next(event for event in activity if event["event_type"] == "retrieval_completed")
+    assert routing["metadata"]["plan_summary"].startswith("Search authorized")
+    assert "raw_mcp_response" not in routing["metadata"]
+    assert retrieval["metadata"] == {
+        "candidate_count": 4,
+        "selected_evidence_count": 1,
+        "retrieval_mode": "hybrid",
+    }
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_api_agent_retrieval_for_each_role() -> None:
+    settings = Settings(
+        rate_limit_backend="memory",
+        memory_backend="memory",
+        retrieval_backend="memory",
+        mcp_backend="memory",
+        mock_token_delay_seconds=0,
+        log_level="WARNING",
+        _env_file=None,
+    )
+    application = create_app(settings)
+    transport = httpx.ASGITransport(app=application)
+    scenarios = {
+        "viewer": "What does the remote-work policy allow?",
+        "analyst": "Count incidents by document type.",
+        "administrator": "Explain the restricted fraud investigation playbook.",
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://e2e") as end_to_end_client:
+        finals = {}
+        for role, question in scenarios.items():
+            response = await end_to_end_client.post(
+                "/v1/chat/stream",
+                json={"message": question},
+                headers=auth_headers(role),
+            )
+            finals[role] = parse_sse(response.text)[-1][1]
+
+    await application.state.agent_runtime.close()
+    await application.state.memory_runtime.close()
+    await application.state.rate_limiter.close()
+
+    assert all(result["status"] in {"complete", "partial"} for result in finals.values())
+    assert all(result["citations"] for result in finals.values())
