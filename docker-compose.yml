@@ -1,19 +1,30 @@
+name: orysys-assistant
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+
 services:
   postgres:
+    <<: *service-defaults
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: orysys_assistant
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-orysys_assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d orysys_assistant"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 3s
       timeout: 2s
       retries: 15
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    networks: [backend]
 
   redis:
+    <<: *service-defaults
     image: redis:7.4-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
@@ -21,27 +32,50 @@ services:
       interval: 3s
       timeout: 2s
       retries: 10
+    networks: [backend]
 
-  mcp:
+  mcp-server:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: docker/Dockerfile.mcp
-    expose:
-      - "8100"
+    read_only: true
+    environment:
+      HOME: /tmp
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    expose: ["8100"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8100), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
 
   api:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: docker/Dockerfile.api
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     environment:
-      APP_ENV: development
+      HOME: /tmp
+      APP_ENV: ${APP_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       REDIS_URL: redis://redis:6379/0
       RATE_LIMIT_BACKEND: redis
       MEMORY_BACKEND: postgres
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/orysys_assistant
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-orysys_assistant}
+      RETRIEVAL_BACKEND: ${RETRIEVAL_BACKEND:-memory}
+      PINECONE_API_KEY: ${PINECONE_API_KEY:-}
+      PINECONE_INDEX: ${PINECONE_INDEX:-commercial-bank-assistant}
+      PINECONE_NAMESPACE: ${PINECONE_NAMESPACE:-commercial-bank}
+      PINECONE_HOST: ${PINECONE_HOST:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MCP_BACKEND: http
-      MCP_SERVER_URL: http://mcp:8100/mcp
+      MCP_SERVER_URL: http://mcp-server:8100/mcp
       AUTH_VIEWER_TOKEN: ${AUTH_VIEWER_TOKEN:-phase2-viewer-demo-token}
       AUTH_ANALYST_TOKEN: ${AUTH_ANALYST_TOKEN:-phase2-analyst-demo-token}
       AUTH_ADMIN_TOKEN: ${AUTH_ADMIN_TOKEN:-phase2-administrator-demo-token}
@@ -49,31 +83,51 @@ services:
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-commercial-bank-assistant}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      mcp:
-        condition: service_started
+      mcp-server:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 15
+    volumes:
+      - runtime-data:/app/.data
+    networks: [frontend, backend]
 
   ui:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: docker/Dockerfile.ui
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     environment:
+      HOME: /tmp
       UI_API_BASE_URL: http://api:8000
     ports:
-      - "8501:8501"
+      - "127.0.0.1:${UI_PORT:-8501}:8501"
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    networks: [frontend]
+
+networks:
+  frontend:
+  backend:
+    internal: true
 
 volumes:
   postgres-data:
+  runtime-data:

@@ -83,7 +83,12 @@ async def _build_memory_runtime(settings: Settings, root: Path) -> RetrievalRunt
 def _build_pinecone_runtime(settings: Settings, root: Path) -> RetrievalRuntime:
     if not settings.pinecone_api_key or not settings.openai_api_key:
         raise RuntimeError("Pinecone retrieval requires PINECONE_API_KEY and OPENAI_API_KEY.")
-    manifest_path = root / "data" / "ingestion_manifest.json"
+    runtime_manifest = root / ".data" / "ingestion_manifest.json"
+    manifest_path = (
+        runtime_manifest
+        if runtime_manifest.is_file()
+        else root / "data" / "ingestion_manifest.json"
+    )
     manifest = IngestionManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
     embeddings = OpenAIEmbeddingProvider(
         settings.openai_api_key,

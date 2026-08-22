@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 async def ingest(backend: str) -> None:
     settings = Settings()
     corpus_root = ROOT / "data" / "sample_documents"
-    manifest_path = ROOT / "data" / "ingestion_manifest.json"
+    manifest_path = ROOT / ".data" / "ingestion_manifest.json"
 
     if backend == "pinecone":
         if not settings.pinecone_api_key or not settings.openai_api_key:
