@@ -5,8 +5,8 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 7 complete — layered input/content guardrails, deterministic citation
-> validation, bounded retries, deadlines, and graceful degradation are integrated.**
+> Current status: **Phase 8 complete — the safe real-time activity panel, correlated trace tree,
+> golden evaluation runner, stored metrics, and role-complete end-to-end suite are integrated.**
 
 ## POC scope
 
@@ -220,6 +220,21 @@ results, MCP failure falls back to available authorized documents, research work
 and the overall request deadline cancels outstanding work. See
 [docs/guardrails-and-degradation.md](docs/guardrails-and-degradation.md).
 
+### Phase 8 activity, observability, and evaluation
+
+The Streamlit activity panel now shows the current agent and graph node, a safe plan summary, active
+tool, retrieval mode and filters, candidate and evidence counts, memory/validation state, degraded
+mode, and one request trace ID. Its API-side metadata allowlist prevents prompts, credentials, raw
+MCP responses, namespaces, and document bodies from reaching the browser. Citation details appear
+in a source-only evidence drawer.
+
+One trace context correlates the root agent, specialists, graph workers, authorization, tools,
+retrieval, and validation. The offline golden runner executes all ten frozen scenarios with
+repeatable fault injection and stores its machine-readable report. Current results are 100% for
+route accuracy, citation validity, groundedness, permission accuracy, expected completion status,
+and degraded-answer clarity, with zero unauthorized-evidence exposure. See
+[docs/observability-and-evaluation.md](docs/observability-and-evaluation.md).
+
 ## Delivery roadmap
 
 1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
@@ -230,7 +245,8 @@ and the overall request deadline cancels outstanding work. See
 6. Phase 5 — complete: bounded concurrent research graph with follow-up recursion
 7. Phase 6 — complete: owner-isolated memory, checkpoints, controlled analysis, and MCP tools
 8. Phase 7 — complete: guardrails, evidence-ledger validation, retries, and safe degradation
-9. Phase 8+ — activity UX, observability, evaluation, hardening, and deployment
+9. Phase 8 — complete: activity UX, correlated traces, golden evaluation, and role E2E tests
+10. Phase 9+ — packaging, delivery documentation, and deployment verification
 
 The original assessment is preserved in [assignment.md](assignment.md); the working plan is
 [lead_ai_assignment_phase_implementation_plan.md](lead_ai_assignment_phase_implementation_plan.md).
