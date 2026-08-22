@@ -93,8 +93,11 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
                     "unrelated general knowledge, entertainment, personal advice, creative "
                     "writing, or requests outside the assistant's approved read-only duties. "
                     "Use out_of_scope for greetings and questions about what the assistant can do "
-                    "so they receive the capabilities response. Return only the structured "
-                    "RouteDecision route enum."
+                    "so they receive the capabilities response. A request to investigate or "
+                    "synthesize across multiple document families—such as incidents, meeting "
+                    "notes, runbooks, architecture, policies, or specifications—is research, "
+                    "even when it mentions incident records. Enterprise is only for a focused "
+                    "system-of-record lookup. Return only the structured RouteDecision route enum."
                 ),
                 name="supervisor-router",
             )

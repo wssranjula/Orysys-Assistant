@@ -113,6 +113,36 @@ async def test_llm_router_validates_the_supervisor_structured_decision() -> None
     assert "two payment services" in prompt
 
 
+@pytest.mark.asyncio
+async def test_enterprise_misroute_is_corrected_for_project_orion_document_research() -> None:
+    class MisroutingAgent:
+        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {"structured_response": {"route": "enterprise"}}
+
+    question = (
+        "Investigate the 2026 Project Orion payment failures across incidents, meeting notes, "
+        "runbooks, and architecture. Which controls were reported complete but later proved "
+        "incomplete, and what runtime evidence changed that assessment?"
+    )
+
+    decision = await LLMIntentRouter(MisroutingAgent()).route(question)
+
+    assert decision.route is AgentRoute.RESEARCH
+
+
+@pytest.mark.asyncio
+async def test_focused_incident_system_lookup_remains_enterprise() -> None:
+    class EnterpriseAgent:
+        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {"structured_response": {"route": "enterprise"}}
+
+    decision = await LLMIntentRouter(EnterpriseAgent()).route(
+        "Look up incident INC-2025-001 in the incident system."
+    )
+
+    assert decision.route is AgentRoute.ENTERPRISE
+
+
 def test_production_factory_has_no_deterministic_router_fallback() -> None:
     settings = Settings(
         openai_api_key=None,

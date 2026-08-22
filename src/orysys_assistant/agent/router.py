@@ -6,6 +6,15 @@ from langsmith import traceable
 
 from orysys_assistant.agent.models import AgentModel, AgentRoute
 
+_DOCUMENT_SOURCE_FAMILIES = (
+    ("incident", "incidents", "postmortem", "postmortems"),
+    ("meeting note", "meeting notes", "minutes"),
+    ("runbook", "runbooks"),
+    ("architecture", "architecture document", "architecture documents"),
+    ("policy", "policies"),
+    ("specification", "specifications"),
+)
+
 
 class RouteDecision(AgentModel):
     route: AgentRoute
@@ -35,4 +44,19 @@ class LLMIntentRouter:
         result = await self._agent.ainvoke(
             {"messages": [{"role": "user", "content": prompt}]}
         )
-        return RouteDecision.model_validate(result["structured_response"])
+        decision = RouteDecision.model_validate(result["structured_response"])
+        if decision.route is AgentRoute.ENTERPRISE and self._is_multi_source_document_request(
+            question
+        ):
+            return RouteDecision(route=AgentRoute.RESEARCH)
+        return decision
+
+    @staticmethod
+    def _is_multi_source_document_request(question: str) -> bool:
+        """Prevent a single-record enterprise lookup from replacing document research."""
+        normalized = " ".join(question.lower().split())
+        source_families = sum(
+            any(marker in normalized for marker in family)
+            for family in _DOCUMENT_SOURCE_FAMILIES
+        )
+        return source_families >= 2

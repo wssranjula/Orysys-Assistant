@@ -22,6 +22,12 @@ Production requires a configured model credential and has no deterministic keywo
 and offline contract checks may inject an `AgentRouter` implementation explicitly; dependency
 injection is not selected automatically by runtime configuration.
 
+One capability-compatibility invariant is enforced after model classification: an `enterprise`
+choice is converted to `research` when the request explicitly names two or more document families.
+The enterprise branch performs one system-of-record lookup and cannot satisfy a cross-document
+investigation; allowing that choice would silently discard the requested evidence sources. This
+guard narrows tool selection and does not grant permissions or provide a general routing fallback.
+
 ## Consequences
 
 Routing handles semantic and contextual intent instead of relying on vocabulary. A model outage can
