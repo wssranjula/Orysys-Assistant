@@ -116,12 +116,14 @@ Copy `.env.example` and keep `.env` untracked. The principal controls are:
 | `MEMORY_BACKEND` | `memory` locally; `postgres` in Compose | conversation/checkpoint storage |
 | `RATE_LIMIT_BACKEND` | `redis` | shared token-bucket adapter |
 | `MCP_BACKEND` | `memory` locally; `http` in Compose | enterprise-tool transport |
+| `AGENT_MODEL` | `gpt-5-mini` | supervisor routing and optional answer synthesis model |
 | `LANGSMITH_TRACING` | `false` | enable trace export when a key is present |
 | `API_PORT`, `UI_PORT` | `8000`, `8501` | loopback Compose ports |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | overall request deadline |
 
-Pinecone mode additionally requires `PINECONE_API_KEY`, index/host configuration,
-`OPENAI_API_KEY`, and a matching embedding dimension. All limits and adapter variables are listed
+The supervisor agent requires `OPENAI_API_KEY`; there is no keyword-routing fallback. Pinecone mode
+additionally requires `PINECONE_API_KEY`, index/host configuration, and a matching embedding
+dimension. All limits and adapter variables are listed
 in [.env.example](.env.example); non-secret policy defaults are in
 [config/defaults.yaml](config/defaults.yaml).
 
@@ -207,14 +209,17 @@ the configured 0.65/0.35 weights, and returns attributed evidence. See
 
 ### Phase 4 agent orchestration
 
-The API now uses one compiled, auditable LangGraph with a deterministic routing node.
+The API now uses one compiled, auditable LangGraph with an LLM supervisor routing node. The
+supervisor returns a strict `RouteDecision` containing one allowed route, confidence, and a short
+user-safe summary; code-controlled conditional edges perform the actual delegation.
 Focused questions use authorized knowledge search directly; multi-document research, structured
 analysis, and enterprise lookups delegate to exactly three static specialists. Every specialist
 has a small code-enforced tool allowlist, while the central gateway continues to enforce RBAC,
 trusted scope, schemas, timeouts, and audit logging.
 
-The four bounded branches converge on one synthesis node. With an OpenAI key, that node uses
-LangChain structured output to produce grounded prose; offline mode retains deterministic synthesis.
+The four bounded branches converge on one synthesis node. When enabled, that node uses LangChain
+structured output to produce grounded prose; deterministic synthesis can still be used for answers,
+but production routing always requires the model-backed supervisor.
 There is no second, unused agent harness. See [docs/agents.md](docs/agents.md).
 
 ### Phase 5 bounded research workflow

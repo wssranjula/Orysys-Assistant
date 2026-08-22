@@ -7,7 +7,7 @@ flowchart TD
     Employee --> UI[Streamlit UI]
     UI -->|SSE chat stream| API[FastAPI API]
     API --> Controls[Auth, rate limit, input guard, trusted scope]
-    Controls --> Root[Production LangGraph]
+    Controls --> Root[LangGraph + LLM Supervisor]
     Root --> Search[Knowledge Search]
     Root --> Research[Research Subagent]
     Root --> Analysis[Analysis Subagent]
@@ -47,7 +47,8 @@ flowchart TD
 
 ## Agent boundary
 
-The production LangGraph owns intent routing, delegation, and draft synthesis. Static Research,
+The production LangGraph owns delegation and draft synthesis; a schema-constrained LLM supervisor
+selects one declared route from bounded conversation context. Static Research,
 Analysis, and Enterprise Tool specialists isolate context and return typed outputs.
 Complex research uses an explicit plan → retrieve → bounded fan-out → reduce → coverage loop.
 Deterministic services remain the sole authority for identity, policy, retrieval scope, memory

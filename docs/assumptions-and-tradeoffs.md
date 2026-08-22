@@ -12,13 +12,14 @@
 
 ## Architecture trade-offs
 
-### Deterministic control versus model autonomy
+### Model routing with deterministic enforcement
 
-The API uses deterministic intent routing and typed specialists for reproducibility, security, and
-offline assessment. The same production LangGraph optionally invokes a provider-backed LangChain
-synthesis agent when configured; it does not maintain a second orchestration implementation.
-Offline mode remains deterministic, while identity, authorization, scope, budgets, citation
-resolution, and validation stay outside model prompts in both modes.
+The API uses a provider-backed LangChain supervisor with structured output for semantic routing.
+The supervisor may choose only one declared route; LangGraph edges, tool surfaces, identity,
+authorization, scope, budgets, citation resolution, and validation remain deterministic code. A
+missing or failed routing model fails the request rather than falling back to keyword matching.
+Tests inject router doubles so offline verification remains reproducible without changing the
+production routing policy.
 
 ### Simplified RLM
 
