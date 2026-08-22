@@ -5,8 +5,8 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 0 complete — contracts and project foundations.** No application
-> service is claimed as runnable until the Phase 1 walking skeleton is implemented.
+> Current status: **Phase 1 complete — runnable end-to-end walking skeleton.** The agent is a
+> deterministic mock until retrieval and orchestration are introduced in later phases.
 
 ## POC scope
 
@@ -63,7 +63,7 @@ tests/                  unit, graph, integration, and end-to-end suites
 docs/                   architecture, scope, contracts, security, and ADRs
 ```
 
-## Development setup
+## Run the walking skeleton
 
 The project targets Python 3.11–3.13 (3.12 recommended) and uses `uv.lock` for reproducible
 installs.
@@ -76,13 +76,43 @@ uv run ruff check .
 uv run mypy src
 ```
 
-Do not commit `.env` or secrets. The Phase 1 service commands will be added with the walking
-skeleton.
+Start the API and UI in separate terminals:
+
+```bash
+uv run python -m uvicorn orysys_assistant.main:app --reload --port 8000
+uv run python -m streamlit run ui/app.py
+```
+
+Then open `http://localhost:8501`. API documentation is available at
+`http://localhost:8000/docs`.
+
+Alternatively, start both services from a clean environment:
+
+```bash
+docker compose up --build
+```
+
+Do not commit `.env` or secrets.
+
+### LangSmith tracing
+
+Set `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and optionally `LANGSMITH_PROJECT` in `.env`.
+Each chat request creates a `phase1-mock-agent` run tagged `phase-1` and `walking-skeleton`.
+Tracing is disabled safely when no key/configuration is supplied.
+
+### Phase 1 behavior
+
+- `POST /v1/chat/stream` emits separate `activity`, `answer_delta`, and terminal `final` events.
+- `GET /health/live` and `GET /health/ready` expose process health.
+- Conversation and feedback endpoints expose their frozen contracts but explicitly report that
+  persistence is unavailable until the memory phase.
+- A server-generated request ID is returned in `X-Request-ID` and propagated to events/logs.
+- Client disconnects cancel the stream. Errors use the common Phase 0 envelope.
 
 ## Delivery roadmap
 
-1. Phase 0 — freeze scope, contracts, architecture, dependencies, and golden scenarios
-2. Phase 1 — FastAPI/Streamlit streaming walking skeleton
+1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
+2. Phase 1 — complete: FastAPI/Streamlit streaming walking skeleton
 3. Phase 2 — authentication, authorization, tool gateway, and Redis rate limiting
 4. Phase 3 — sample corpus, ingestion, and hybrid Pinecone retrieval
 5. Phase 4 — root Deep Agent and specialized agents
@@ -91,4 +121,3 @@ skeleton.
 
 The original assessment is preserved in [assignment.md](assignment.md); the working plan is
 [lead_ai_assignment_phase_implementation_plan.md](lead_ai_assignment_phase_implementation_plan.md).
-
