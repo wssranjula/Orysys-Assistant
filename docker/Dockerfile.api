@@ -9,6 +9,8 @@ RUN pip install --no-cache-dir uv==0.12.5
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY data ./data
+COPY skills ./skills
 RUN uv sync --frozen --no-dev
 
 EXPOSE 8000

@@ -7,6 +7,7 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.exceptions import RedisError
 
+from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import (
     AuthenticationError,
@@ -14,6 +15,7 @@ from orysys_assistant.domain.errors import (
     RateLimitUnavailableError,
 )
 from orysys_assistant.observability.logging import get_logger
+from orysys_assistant.retrieval.runtime import AgentRuntimeManager
 from orysys_assistant.security.access_scope import AccessScopeService
 from orysys_assistant.security.authentication import AuthenticationService
 from orysys_assistant.security.authorization import AuthorizationPolicy, Capability
@@ -51,6 +53,14 @@ AuthenticationDependency = Annotated[AuthenticationService, Depends(get_authenti
 ScopeServiceDependency = Annotated[AccessScopeService, Depends(get_scope_service)]
 AuthorizationDependency = Annotated[AuthorizationPolicy, Depends(get_authorization_policy)]
 RateLimiterDependency = Annotated[TokenBucketRateLimiter, Depends(get_rate_limiter)]
+
+
+async def get_root_orchestrator(request: Request) -> RootOrchestrator:
+    runtime = cast(AgentRuntimeManager, request.app.state.agent_runtime)
+    return await runtime.get_orchestrator()
+
+
+RootOrchestratorDependency = Annotated[RootOrchestrator, Depends(get_root_orchestrator)]
 
 
 def get_current_identity(

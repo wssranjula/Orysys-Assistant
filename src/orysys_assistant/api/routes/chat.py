@@ -1,4 +1,4 @@
-"""Server-Sent Event chat stream for the Phase 1 mock agent."""
+"""Server-Sent Event chat stream for the controlled Phase 4 agent runtime."""
 
 import asyncio
 import json
@@ -11,7 +11,10 @@ import structlog
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
+from orysys_assistant.agent.models import AgentTransition
+from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.api.dependencies import (
+    RootOrchestratorDependency,
     SettingsDependency,
     TrustedChatContextDependency,
 )
@@ -26,7 +29,6 @@ from orysys_assistant.domain.models import (
     ResponseStatus,
 )
 from orysys_assistant.observability.logging import get_logger
-from orysys_assistant.observability.tracing import run_traced_mock_agent
 from orysys_assistant.security.models import TrustedRequestContext
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
@@ -74,6 +76,7 @@ async def stream_chat_events(
     payload: ChatRequest,
     settings: Settings,
     context: TrustedRequestContext,
+    orchestrator: RootOrchestrator,
 ) -> AsyncIterator[dict[str, str]]:
     request_id: UUID = request.state.request_id
     conversation_id = payload.conversation_id or uuid4()
@@ -120,26 +123,36 @@ async def stream_chat_events(
                 node="request_entry",
             ),
         )
-        yield _sse(
-            "activity",
-            _activity(
-                event_type=ActivityEventType.AGENT_STARTED,
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=ActivityStatus.STARTED,
-                message="Temporary Phase 1 agent started.",
-                agent="mock_agent",
-                node="mock_response",
-            ),
+        transitions: asyncio.Queue[AgentTransition] = asyncio.Queue()
+        agent_task = asyncio.create_task(
+            orchestrator.run(payload.message, context, transitions.put)
         )
-
-        answer = await run_traced_mock_agent(
-            payload.message,
-            enabled=settings.langsmith_tracing,
-            api_key=settings.langsmith_api_key,
-            project_name=settings.langsmith_project,
-            metadata={"request_id": str(request_id), "conversation_id": str(conversation_id)},
-        )
+        try:
+            while not agent_task.done() or not transitions.empty():
+                await _ensure_connected(request)
+                try:
+                    transition = await asyncio.wait_for(transitions.get(), timeout=0.05)
+                except TimeoutError:
+                    continue
+                yield _sse(
+                    "activity",
+                    _activity(
+                        event_type=ActivityEventType(transition.event_type),
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        status=ActivityStatus(transition.status),
+                        message=transition.message,
+                        agent=transition.agent,
+                        node=transition.node,
+                        metadata=transition.metadata,
+                    ),
+                )
+            result = await agent_task
+        except BaseException:
+            if not agent_task.done():
+                agent_task.cancel()
+            await asyncio.gather(agent_task, return_exceptions=True)
+            raise
 
         yield _sse(
             "activity",
@@ -148,13 +161,13 @@ async def stream_chat_events(
                 request_id=request_id,
                 conversation_id=conversation_id,
                 status=ActivityStatus.STARTED,
-                message="Streaming mock answer tokens.",
-                agent="mock_agent",
+                message="Streaming the grounded answer.",
+                agent=orchestrator.name,
                 node="answer_stream",
             ),
         )
 
-        for sequence, token in enumerate(re.findall(r"\S+\s*", answer)):
+        for sequence, token in enumerate(re.findall(r"\S+\s*", result.answer)):
             await _ensure_connected(request)
             yield _sse(
                 "answer_delta",
@@ -175,7 +188,7 @@ async def stream_chat_events(
                 request_id=request_id,
                 conversation_id=conversation_id,
                 status=ActivityStatus.COMPLETED,
-                message="Phase 1 response contract validated.",
+                message="Structured agent response contract validated.",
                 node="output_validation",
             ),
         )
@@ -198,8 +211,9 @@ async def stream_chat_events(
                 request_id=request_id,
                 conversation_id=conversation_id,
                 status=ResponseStatus.COMPLETE,
-                answer=answer,
-                warnings=["Phase 1 uses a mock agent; retrieval is not implemented yet."],
+                answer=result.answer,
+                citations=result.citations,
+                warnings=result.warnings,
             ),
         )
         logger.info("chat_stream_completed", duration_ms=duration_ms, result="complete")
@@ -247,9 +261,10 @@ async def stream_chat(
     payload: ChatRequest,
     settings: SettingsDependency,
     context: TrustedChatContextDependency,
+    orchestrator: RootOrchestratorDependency,
 ) -> EventSourceResponse:
     return EventSourceResponse(
-        stream_chat_events(request, payload, settings, context),
+        stream_chat_events(request, payload, settings, context, orchestrator),
         ping=15,
         headers={
             "Cache-Control": "no-cache, no-transform",
