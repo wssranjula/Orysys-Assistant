@@ -14,11 +14,13 @@ from orysys_assistant.security.authorization import Capability
 from orysys_assistant.security.models import TrustedRequestContext
 from orysys_assistant.tools.gateway import ToolSpec
 
+KNOWLEDGE_QUERY_MAX_LENGTH = 2_000
+
 
 class KnowledgeSearchInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    query: str = Field(min_length=2, max_length=2_000)
+    query: str = Field(min_length=2, max_length=KNOWLEDGE_QUERY_MAX_LENGTH)
     department: str | None = Field(default=None, max_length=100)
     document_type: str | None = Field(default=None, max_length=100)
     created_after: date | None = None

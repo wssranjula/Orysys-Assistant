@@ -24,6 +24,7 @@ from orysys_assistant.domain.models import Citation, ResponseStatus
 from orysys_assistant.guardrails.content import unwrap_evidence
 from orysys_assistant.retrieval.models import Evidence
 from orysys_assistant.security.models import TrustedRequestContext
+from orysys_assistant.tools.knowledge_search import KNOWLEDGE_QUERY_MAX_LENGTH
 
 TransitionSink = Callable[[AgentTransition], Awaitable[None]]
 
@@ -333,9 +334,17 @@ class RootOrchestrator:
 
     @staticmethod
     def _with_conversation_context(question: str, summary: str) -> str:
+        question = question.strip()
+        if len(question) >= KNOWLEDGE_QUERY_MAX_LENGTH:
+            return question[:KNOWLEDGE_QUERY_MAX_LENGTH]
         if not summary:
             return question
-        return f"{question}\n\nPrior conversation summary:\n{summary}"
+
+        separator = "\n\nPrior conversation summary:\n"
+        remaining = KNOWLEDGE_QUERY_MAX_LENGTH - len(question) - len(separator)
+        if remaining <= 0:
+            return question
+        return f"{question}{separator}{summary[-remaining:]}"
 
     @staticmethod
     def _plan_summary(route: AgentRoute) -> str:

@@ -10,6 +10,7 @@ from orysys_assistant.agent.build_agent import (
     build_root_orchestrator,
 )
 from orysys_assistant.agent.models import AgentRoute
+from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import AuthorizationError
@@ -20,7 +21,11 @@ from orysys_assistant.security.authorization import AuthorizationPolicy
 from orysys_assistant.security.models import TrustedRequestContext, UserIdentity
 from orysys_assistant.tools.enterprise import enterprise_tool_specs
 from orysys_assistant.tools.gateway import ToolGateway
-from orysys_assistant.tools.knowledge_search import knowledge_search_spec
+from orysys_assistant.tools.knowledge_search import (
+    KNOWLEDGE_QUERY_MAX_LENGTH,
+    KnowledgeSearchInput,
+    knowledge_search_spec,
+)
 from orysys_assistant.tools.mcp_client import InMemoryEnterpriseClient
 from orysys_assistant.tools.python_analysis import python_analysis_spec
 
@@ -38,6 +43,25 @@ def context(role: Role) -> TrustedRequestContext:
         access_scope=AccessScopeService(Settings(_env_file=None)).build(identity),
         rate_limit_remaining=10,
     )
+
+
+def test_conversation_context_fits_the_knowledge_search_contract() -> None:
+    question = "Were there any incidents related to attachments?"
+    summary = "older context " * 1_000 + "most recent attachment discussion"
+
+    query = RootOrchestrator._with_conversation_context(question, summary)
+
+    assert len(query) == KNOWLEDGE_QUERY_MAX_LENGTH
+    assert query.startswith(question)
+    assert query.endswith("most recent attachment discussion")
+    assert KnowledgeSearchInput(query=query).query == query
+
+
+def test_long_current_question_is_bounded_without_conversation_context() -> None:
+    query = RootOrchestrator._with_conversation_context("q" * 8_000, "")
+
+    assert len(query) == KNOWLEDGE_QUERY_MAX_LENGTH
+    assert KnowledgeSearchInput(query=query).query == query
 
 
 async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
