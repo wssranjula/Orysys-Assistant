@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, status
 
-from orysys_assistant.agent.approval_graph import ApprovalRecord
+from orysys_assistant.agent.approval_graph import ApprovalRecord, ApprovalStatus
 from orysys_assistant.api.dependencies import (
     ApprovalServiceDependency,
     AuthorizationDependency,
@@ -14,6 +14,7 @@ from orysys_assistant.api.dependencies import (
 from orysys_assistant.domain.models import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
+    ApprovalListResponse,
     ApprovalResponse,
 )
 from orysys_assistant.security.authorization import Capability
@@ -37,6 +38,19 @@ async def request_approval(
     policy.require(context.identity, Capability.ADMIN_TOOLS)
     record = await service.create(payload.action, payload.parameters, payload.reason, context)
     return _response(record)
+
+
+@router.get("", response_model=ApprovalListResponse)
+async def list_approvals(
+    identity: IdentityDependency,
+    policy: AuthorizationDependency,
+    service: ApprovalServiceDependency,
+    approval_status: ApprovalStatus | None = None,
+) -> ApprovalListResponse:
+    policy.require(identity, Capability.ADMIN_TOOLS)
+    return ApprovalListResponse(
+        approvals=[_response(item) for item in await service.list(approval_status)]
+    )
 
 
 @router.get("/{approval_id}", response_model=ApprovalResponse)

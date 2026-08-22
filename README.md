@@ -17,7 +17,7 @@ role, expose safe operational activity, and fail without fabricating policy or l
 
 ## POC scope
 
-The POC supports one fictional organization (`commercial-bank`), three hardcoded users and
+The POC supports one fictional organization (`commercial-bank`), four hardcoded users and
 roles, six read-only tools, and six document categories. It answers general knowledge
 questions, performs bounded incident research and structured analysis, maintains context
 within a conversation, and emits inspectable activity events. Authorization, access filters,
@@ -54,7 +54,7 @@ bounded LangGraph subgraph. See [docs/architecture.md](docs/architecture.md) and
 ## Contracts and acceptance baseline
 
 - API, SSE, response, citation, and error contracts: [docs/contracts.md](docs/contracts.md)
-- Execution and rate limits: [config/defaults.yaml](config/defaults.yaml)
+- Execution and rate limits: environment-backed [settings](src/orysys_assistant/config.py)
 - Golden assessment scenarios: [data/golden_questions.json](data/golden_questions.json)
 - Decision records: [docs/adr](docs/adr)
 
@@ -122,11 +122,11 @@ Copy `.env.example` and keep `.env` untracked. The principal controls are:
 | `API_PORT`, `UI_PORT` | `8000`, `8501` | loopback Compose ports |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | overall request deadline |
 
-The supervisor agent requires `OPENAI_API_KEY`; there is no keyword-routing fallback. Pinecone mode
-additionally requires `PINECONE_API_KEY`, index/host configuration, and a matching embedding
-dimension. All limits and adapter variables are listed
-in [.env.example](.env.example); non-secret policy defaults are in
-[config/defaults.yaml](config/defaults.yaml).
+When `OPENAI_API_KEY` is unset, the local deterministic profile uses a conservative keyword router;
+set it to enable the model-backed supervisor and answer synthesis. Pinecone mode additionally
+requires `PINECONE_API_KEY`, index/host configuration, and a matching embedding dimension. All
+limits and adapter variables are listed
+in [.env.example](.env.example).
 
 ## Sample users
 
@@ -137,6 +137,7 @@ These credentials are fictional and exist only for the assessment POC:
 | Viewer | `viewer@commercialbank.test` | `ViewerDemo!2026` |
 | Analyst | `analyst@commercialbank.test` | `AnalystDemo!2026` |
 | Administrator | `admin@commercialbank.test` | `AdminDemo!2026` |
+| Approver | `approver@commercialbank.test` | `ApproverDemo!2026` |
 
 The application authentication records store salted PBKDF2 digests rather than these published
 demo passwords. Successful login returns an opaque bearer token whose identity and role are

@@ -52,8 +52,11 @@ def create_app(
     tool_gateway = ToolGateway(authorization_policy)
     incident_write_store = DummyIncidentWriteStore()
     tool_gateway.register(modify_incident_spec(incident_write_store))
-    approval_service = ApprovalService(tool_gateway)
     memory_runtime = MemoryRuntime(resolved_settings)
+    approval_service = ApprovalService(
+        tool_gateway,
+        resolved_settings.database_url if resolved_settings.memory_backend == "postgres" else None,
+    )
     agent_runtime = AgentRuntimeManager(
         resolved_settings,
         tool_gateway,
@@ -69,9 +72,11 @@ def create_app(
             environment=resolved_settings.app_env,
             langsmith_tracing=resolved_settings.langsmith_enabled,
         )
+        await approval_service.start()
         await agent_runtime.get_orchestrator()
         yield
         await agent_runtime.close()
+        await approval_service.close()
         await memory_runtime.close()
         await resolved_rate_limiter.close()
         logger.info("application_stopped")

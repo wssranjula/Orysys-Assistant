@@ -47,9 +47,8 @@ class HybridLexicalReranker:
             )
             lexical_score = 0.8 * token_coverage + 0.2 * identifier_coverage
             rerank_score = (
-                (1 - self._lexical_weight) * candidate.final_score
-                + self._lexical_weight * lexical_score
-            )
+                1 - self._lexical_weight
+            ) * candidate.final_score + self._lexical_weight * lexical_score
             rescored.append(
                 candidate.model_copy(
                     update={

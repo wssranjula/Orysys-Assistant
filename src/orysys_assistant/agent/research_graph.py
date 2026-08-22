@@ -634,8 +634,7 @@ class ResearchWorkflow:
         search_query = search_query[:300]
         identifiers = list(
             dict.fromkeys(
-                match.group(0).upper()
-                for match in _IDENTIFIER_PATTERN.finditer(search_query)
+                match.group(0).upper() for match in _IDENTIFIER_PATTERN.finditer(search_query)
             )
         )
         years = [int(value) for value in _YEAR_PATTERN.findall(f"{search_query} {question}")]

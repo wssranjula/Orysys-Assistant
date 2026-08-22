@@ -50,12 +50,10 @@ nodes. It is
 compiled with the configured checkpointer, so message state is isolated by the server-derived
 user/conversation thread ID.
 
-`OPENAI_API_KEY` is required for supervisor routing. When `AGENT_SYNTHESIS_ENABLED=true`, the
-synthesis node also uses a
-LangChain agent with provider-backed structured output. The model receives only the bounded
-specialist result and authorized evidence. Citation resolution and output validation remain
-deterministic application controls. Tests inject schema-compatible router doubles; production does
-not silently substitute deterministic routing when the model is unavailable.
+With `OPENAI_API_KEY`, supervisor routing and optional synthesis use provider-backed structured
+output. Without it, the local deterministic profile uses a conservative router so Compose can run
+without cloud credentials. The model receives only the bounded specialist result and authorized
+evidence. Citation resolution and output validation remain deterministic application controls.
 
 Graph `custom` updates are streamed directly to SSE; callback-based transitions remain only as a
 compatibility surface for tests and external adapters.

@@ -12,8 +12,9 @@ against a likely shared dependency failure.
 ## Human approval
 
 `POST /v1/approvals` creates a pending request for the dummy `modify_incident` administrative tool.
-No write occurs while pending. An administrator explicitly resumes the approval graph with
-`POST /v1/approvals/{approval_id}/decision`. Approval executes once; rejection has no side effect;
+No write occurs while pending. A different administrator explicitly resumes the approval graph with
+`POST /v1/approvals/{approval_id}/decision`; self-approval is denied. Approval records are stored
+in PostgreSQL in the Compose profile. Approval executes once; rejection has no side effect;
 duplicate decisions are rejected. The write tool has schema validation, RBAC, audit logging, a
 timeout, and zero automatic retries to avoid duplicating an uncertain side effect.
 

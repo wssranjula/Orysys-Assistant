@@ -6,7 +6,7 @@ from orysys_assistant.agent.approval_graph import ApprovalService, ApprovalStatu
 from orysys_assistant.agent.research_graph import ResearchLimits, ResearchWorkflow
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
-from orysys_assistant.domain.errors import InvalidRequestError
+from orysys_assistant.domain.errors import AuthorizationError, InvalidRequestError
 from orysys_assistant.domain.models import Role
 from orysys_assistant.memory.repository import InMemoryConversationRepository
 from orysys_assistant.retrieval.models import Evidence
@@ -19,9 +19,9 @@ from orysys_assistant.tools.gateway import ToolGateway, ToolSpec
 from orysys_assistant.tools.knowledge_search import KnowledgeSearchInput
 
 
-def context(role: Role = Role.ADMINISTRATOR) -> TrustedRequestContext:
+def context(role: Role = Role.ADMINISTRATOR, user_id: str | None = None) -> TrustedRequestContext:
     identity = UserIdentity(
-        user_id=f"phase10-{role.value}",
+        user_id=user_id or f"phase10-{role.value}",
         username=f"{role.value}@commercialbank.test",
         display_name="Phase 10 User",
         role=role,
@@ -89,26 +89,30 @@ async def test_human_approval_executes_once_and_rejection_has_no_side_effect() -
     store = DummyIncidentWriteStore()
     gateway.register(modify_incident_spec(store))
     service = ApprovalService(gateway)
-    admin = context()
+    requester = context(user_id="phase10-requester")
+    approver = context(user_id="phase10-approver")
     parameters = {
         "incident_id": "INC-2026-004",
         "status": "monitoring",
         "reason": "Recovery checks completed",
     }
 
-    pending = await service.create("modify_incident", parameters, "Operational update", admin)
+    pending = await service.create("modify_incident", parameters, "Operational update", requester)
     assert pending.status is ApprovalStatus.PENDING
     assert store.updates == []
 
-    executed = await service.decide(pending.approval_id, True, admin)
+    with pytest.raises(AuthorizationError):
+        await service.decide(pending.approval_id, True, requester)
+
+    executed = await service.decide(pending.approval_id, True, approver)
     assert executed.status is ApprovalStatus.EXECUTED
     assert len(store.updates) == 1
     with pytest.raises(InvalidRequestError):
-        await service.decide(pending.approval_id, True, admin)
+        await service.decide(pending.approval_id, True, approver)
     assert len(store.updates) == 1
 
-    rejected = await service.create("modify_incident", parameters, "Reject this update", admin)
-    rejected = await service.decide(rejected.approval_id, False, admin)
+    rejected = await service.create("modify_incident", parameters, "Reject this update", requester)
+    rejected = await service.decide(rejected.approval_id, False, approver)
     assert rejected.status is ApprovalStatus.REJECTED
     assert len(store.updates) == 1
 
@@ -153,8 +157,6 @@ async def test_all_worker_failures_open_circuit_without_recursive_fanout() -> No
     assert any("contain" in warning for warning in result.result.warnings)
     assert not any(item.node == "followup_planner" for item in transitions)
     reducer = next(
-        item
-        for item in transitions
-        if item.node == "reducer" and item.status == "completed"
+        item for item in transitions if item.node == "reducer" and item.status == "completed"
     )
     assert reducer.metadata["failure_circuit_open"] is True

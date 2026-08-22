@@ -225,9 +225,7 @@ class RootOrchestrator:
         )
         return {
             "route": route,
-            "question": self._with_conversation_context(
-                state["question"], full_context
-            ),
+            "question": self._with_conversation_context(state["question"], full_context),
         }
 
     @staticmethod

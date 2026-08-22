@@ -26,9 +26,7 @@ class DummyIncidentWriteStore:
         self._updates: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
 
-    async def modify(
-        self, parameters: BaseModel, context: TrustedRequestContext
-    ) -> dict[str, Any]:
+    async def modify(self, parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
         request = ModifyIncidentInput.model_validate(parameters)
         update = {
             **request.model_dump(mode="json"),

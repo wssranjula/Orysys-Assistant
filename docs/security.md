@@ -2,7 +2,7 @@
 
 ## Identity and credentials
 
-The POC has exactly three fictional users. Application user records contain only unique salts
+The POC has exactly four fictional users. Application user records contain only unique salts
 and PBKDF2-HMAC-SHA256 digests with 310,000 iterations; the public demo credentials are
 documented separately for evaluators. Authentication uses a generic
 failure message and performs hash work for unknown usernames to reduce enumeration timing

@@ -11,7 +11,7 @@ from orysys_assistant.agent.build_agent import (
 )
 from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
 from orysys_assistant.agent.orchestrator import RootOrchestrator
-from orysys_assistant.agent.router import LLMIntentRouter, RouteDecision
+from orysys_assistant.agent.router import DeterministicIntentRouter, LLMIntentRouter, RouteDecision
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import AuthorizationError
@@ -143,17 +143,22 @@ async def test_focused_incident_system_lookup_remains_enterprise() -> None:
     assert decision.route is AgentRoute.ENTERPRISE
 
 
-def test_production_factory_has_no_deterministic_router_fallback() -> None:
+@pytest.mark.asyncio
+async def test_local_factory_uses_deterministic_router_without_model_credentials() -> None:
     settings = Settings(
         openai_api_key=None,
         agent_synthesis_enabled=False,
         _env_file=None,
     )
 
-    with pytest.raises(RuntimeError, match="LLM supervisor requires OPENAI_API_KEY"):
-        build_root_orchestrator(
-            AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings)
-        )
+    orchestrator = build_root_orchestrator(
+        AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings)
+    )
+
+    assert isinstance(orchestrator._router, DeterministicIntentRouter)
+    assert (
+        await orchestrator._router.route("Count incidents by category.")
+    ).route is AgentRoute.ANALYSIS
 
 
 def test_production_supervisor_uses_retryable_route_only_tool_strategy(
@@ -198,9 +203,7 @@ async def test_out_of_scope_route_uses_no_tools_and_returns_duties() -> None:
         transitions.append(transition)
 
     request_context = context(Role.VIEWER)
-    result = await orchestrator.run(
-        "Tell me a joke about databases.", request_context, capture
-    )
+    result = await orchestrator.run("Tell me a joke about databases.", request_context, capture)
     validation = OutputValidator().validate(result, request_context.access_scope)
 
     assert result.route is AgentRoute.OUT_OF_SCOPE

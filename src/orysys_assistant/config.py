@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     auth_viewer_token: str = "phase2-viewer-demo-token"
     auth_analyst_token: str = "phase2-analyst-demo-token"
     auth_admin_token: str = "phase2-administrator-demo-token"
+    auth_approver_token: str = "phase10-approver-demo-token"
     organization_id: str = "commercial-bank"
     pinecone_namespace: str = "commercial-bank"
     pinecone_api_key: str | None = None
@@ -33,7 +34,6 @@ class Settings(BaseSettings):
     retrieval_dense_weight: float = Field(default=0.65, ge=0, le=1)
     retrieval_sparse_weight: float = Field(default=0.35, ge=0, le=1)
     retrieval_candidate_count: int = Field(default=20, gt=0, le=100)
-    retrieval_final_count: int = Field(default=6, gt=0, le=20)
     retrieval_min_sparse_score: float = Field(default=0.1, ge=0, le=10)
     retrieval_retry_attempts: int = Field(default=2, ge=0, le=3)
     retrieval_reranking_enabled: bool = True

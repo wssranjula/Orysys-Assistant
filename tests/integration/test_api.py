@@ -19,6 +19,7 @@ TOKENS = {
     "viewer": "phase2-viewer-demo-token",
     "analyst": "phase2-analyst-demo-token",
     "administrator": "phase2-administrator-demo-token",
+    "approver": "phase10-approver-demo-token",
 }
 
 
@@ -306,12 +307,8 @@ async def test_explicit_long_term_memory_is_loaded_and_owner_isolated(
         json={"key": "answer_style", "value": "Use concise bullets", "explicit": True},
         headers=auth_headers("analyst"),
     )
-    analyst_list = await client.get(
-        "/v1/memory/preferences", headers=auth_headers("analyst")
-    )
-    viewer_list = await client.get(
-        "/v1/memory/preferences", headers=auth_headers("viewer")
-    )
+    analyst_list = await client.get("/v1/memory/preferences", headers=auth_headers("analyst"))
+    viewer_list = await client.get("/v1/memory/preferences", headers=auth_headers("viewer"))
     chat = await client.post(
         "/v1/chat/stream", json={"message": "Use my preferences"}, headers=auth_headers("analyst")
     )
@@ -347,23 +344,44 @@ async def test_admin_write_requires_approval_and_is_idempotent(
     assert pending.json()["status"] == "pending"
     assert app.state.incident_write_store.updates == []
 
+    pending_list = await client.get(
+        "/v1/approvals?approval_status=pending",
+        headers=auth_headers("administrator"),
+    )
+    viewer_list = await client.get("/v1/approvals", headers=auth_headers("viewer"))
+    assert [item["approval_id"] for item in pending_list.json()["approvals"]] == [
+        pending.json()["approval_id"]
+    ]
+    assert viewer_list.status_code == 403
+
     approval_id = pending.json()["approval_id"]
-    approved = await client.post(
+    self_approval = await client.post(
         f"/v1/approvals/{approval_id}/decision",
         json={"approved": True},
         headers=auth_headers("administrator"),
+    )
+    approved = await client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        json={"approved": True},
+        headers=auth_headers("approver"),
     )
     duplicate = await client.post(
         f"/v1/approvals/{approval_id}/decision",
         json={"approved": True},
-        headers=auth_headers("administrator"),
+        headers=auth_headers("approver"),
     )
 
+    assert self_approval.status_code == 403
     assert approved.status_code == 200
     assert approved.json()["status"] == "executed"
     assert len(app.state.incident_write_store.updates) == 1
     assert duplicate.status_code == 400
     assert len(app.state.incident_write_store.updates) == 1
+    no_longer_pending = await client.get(
+        "/v1/approvals?approval_status=pending",
+        headers=auth_headers("administrator"),
+    )
+    assert no_longer_pending.json()["approvals"] == []
 
 
 @pytest.mark.asyncio

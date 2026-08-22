@@ -189,7 +189,7 @@ async def stream_chat_events(
                 "conversation_id": str(conversation_id),
                 "role": context.identity.role.value,
                 "agent_name": orchestrator.name,
-            }
+            },
         ):
             stream_method = getattr(orchestrator, "stream", None)
             if stream_method is not None:
@@ -238,9 +238,7 @@ async def stream_chat_events(
                         while not agent_task.done() or not transitions.empty():
                             await _ensure_connected(request)
                             try:
-                                transition = await asyncio.wait_for(
-                                    transitions.get(), timeout=0.05
-                                )
+                                transition = await asyncio.wait_for(transitions.get(), timeout=0.05)
                             except TimeoutError:
                                 continue
                             yield _sse(

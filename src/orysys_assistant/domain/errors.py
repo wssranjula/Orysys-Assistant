@@ -49,23 +49,7 @@ class RetrievalUnavailableError(ApplicationError):
     retryable = True
 
 
-class ModelUnavailableError(ApplicationError):
-    code = "model_unavailable"
-    status_code = 503
-    retryable = True
-
-
 class ToolTimeoutError(ApplicationError):
     code = "execution_timeout"
     status_code = 504
     retryable = True
-
-
-class CitationValidationError(ApplicationError):
-    code = "citation_validation_failed"
-    status_code = 422
-
-
-class InsufficientEvidenceError(ApplicationError):
-    code = "insufficient_evidence"
-    status_code = 422

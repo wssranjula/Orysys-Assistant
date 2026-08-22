@@ -173,6 +173,10 @@ class ApprovalResponse(StrictModel):
     failure_type: str | None = None
 
 
+class ApprovalListResponse(StrictModel):
+    approvals: list[ApprovalResponse] = Field(default_factory=list)
+
+
 class FeedbackRequest(StrictModel):
     conversation_id: UUID
     response_id: UUID

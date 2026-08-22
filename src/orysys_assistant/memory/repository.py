@@ -29,9 +29,7 @@ class ConversationRepository(Protocol):
 
     async def list_preferences(self, user_id: str) -> list[LongTermPreference]: ...
 
-    async def upsert_preference(
-        self, user_id: str, key: str, value: str
-    ) -> LongTermPreference: ...
+    async def upsert_preference(self, user_id: str, key: str, value: str) -> LongTermPreference: ...
 
     async def delete_preference(self, user_id: str, key: str) -> bool: ...
 
@@ -127,9 +125,7 @@ class InMemoryConversationRepository:
                 key=lambda item: item.key,
             )
 
-    async def upsert_preference(
-        self, user_id: str, key: str, value: str
-    ) -> LongTermPreference:
+    async def upsert_preference(self, user_id: str, key: str, value: str) -> LongTermPreference:
         preference = LongTermPreference(user_id=user_id, key=key, value=value)
         async with self._lock:
             self._preferences[(user_id, key)] = preference
@@ -286,9 +282,7 @@ class PostgresConversationRepository:
             for row in rows
         ]
 
-    async def upsert_preference(
-        self, user_id: str, key: str, value: str
-    ) -> LongTermPreference:
+    async def upsert_preference(self, user_id: str, key: str, value: str) -> LongTermPreference:
         pool = self._require_pool()
         async with pool.acquire() as connection:
             row = await connection.fetchrow(
