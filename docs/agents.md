@@ -1,6 +1,6 @@
 # Agent Orchestration (Phase 4)
 
-The production runtime is one compiled LangGraph with a model-backed supervisor, four bounded
+The production runtime is one compiled LangGraph with a model-backed supervisor, five bounded
 branches, and a shared synthesis node. Every supervisor decision is schema-validated and visible in
 SSE activity events and LangSmith traces.
 
@@ -10,6 +10,7 @@ SSE activity events and LangSmith traces.
 | `research` | Research specialist | `knowledge_search` | Multi-document investigation and grounded findings |
 | `analysis` | Analysis specialist | `knowledge_search`, `structured_analysis` | Bounded aggregation over retrieved evidence |
 | `enterprise` | Enterprise-tool specialist | Six approved read-only MCP tools | Ownership, directory, and incident-record lookups |
+| `out_of_scope` | Root | None | Explain the assistant's approved capabilities and duties |
 
 Tool visibility is enforced by each agent's `ScopedToolbox`. Execution then passes through the
 single `ToolGateway`, which independently enforces registration, RBAC capability, server-owned
@@ -20,7 +21,7 @@ an agent another tool or broaden retrieval scope.
 
 The supervisor is a LangChain agent with no tools and a strict `RouteDecision` response schema. It
 uses the current request and bounded conversation context to select `direct_knowledge`, `research`,
-`analysis`, or `enterprise`. The graph accepts only that enum and maps it to code-defined conditional
+`analysis`, `enterprise`, or `out_of_scope`. The graph accepts only that enum and maps it to code-defined conditional
 edges; the model cannot create a route, tool, permission, or execution budget. There is deliberately
 no keyword-routing fallback. The router emits an `agent_started` event and a `routing_completed`
 event. Delegated routes additionally
@@ -39,7 +40,8 @@ surface; recursion occurs only inside that code-controlled specialist workflow.
 ## Production graph and synthesis
 
 `build_root_orchestrator` builds the only agent runtime used by the API. The outer graph contains
-`route`, `direct_knowledge`, `research`, `analysis`, `enterprise`, and `synthesize` nodes. It is
+`route`, `direct_knowledge`, `research`, `analysis`, `enterprise`, `out_of_scope`, and `synthesize`
+nodes. It is
 compiled with the configured checkpointer, so message state is isolated by the server-derived
 user/conversation thread ID.
 

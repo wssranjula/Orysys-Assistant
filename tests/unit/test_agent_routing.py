@@ -14,6 +14,7 @@ from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import AuthorizationError
 from orysys_assistant.domain.models import Role
+from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.retrieval.runtime import build_retrieval_runtime
 from orysys_assistant.security.access_scope import AccessScopeService
 from orysys_assistant.security.authorization import AuthorizationPolicy
@@ -51,6 +52,7 @@ class TestRouter:
         "Count payment incidents by root cause.": AgentRoute.ANALYSIS,
         "Who owns the payment service?": AgentRoute.ENTERPRISE,
         "Investigate recurring payment incidents across sources.": AgentRoute.RESEARCH,
+        "Tell me a joke about databases.": AgentRoute.OUT_OF_SCOPE,
     }
 
     async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
@@ -119,6 +121,33 @@ def test_production_factory_has_no_deterministic_router_fallback() -> None:
         build_root_orchestrator(
             AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings)
         )
+
+
+@pytest.mark.asyncio
+async def test_out_of_scope_route_uses_no_tools_and_returns_duties() -> None:
+    orchestrator = build_root_orchestrator(
+        AgentDependencies(ToolGateway(AuthorizationPolicy()), router=TestRouter())
+    )
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    request_context = context(Role.VIEWER)
+    result = await orchestrator.run(
+        "Tell me a joke about databases.", request_context, capture
+    )
+    validation = OutputValidator().validate(result, request_context.access_scope)
+
+    assert result.route is AgentRoute.OUT_OF_SCOPE
+    assert result.citations == []
+    assert "organizational assistant" in result.answer
+    assert "approved read-only duties" in result.answer
+    assert validation.valid is True
+    assert [item.event_type for item in transitions] == [
+        "agent_started",
+        "routing_completed",
+    ]
 
 
 async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
@@ -257,4 +286,5 @@ def test_production_orchestrator_is_a_compiled_langgraph() -> None:
         "research",
         "analysis",
         "enterprise",
+        "out_of_scope",
     } <= set(orchestrator.graph.nodes)

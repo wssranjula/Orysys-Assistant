@@ -18,6 +18,7 @@ class AgentRoute(StrEnum):
     RESEARCH = "research"
     ANALYSIS = "analysis"
     ENTERPRISE = "enterprise"
+    OUT_OF_SCOPE = "out_of_scope"
 
 
 class AgentTransition(AgentModel):

@@ -27,6 +27,7 @@ class ScenarioRouter:
         "What does the remote-work policy allow?": AgentRoute.DIRECT_KNOWLEDGE,
         "Count incidents by document type.": AgentRoute.ANALYSIS,
         "Explain the restricted fraud investigation playbook.": AgentRoute.DIRECT_KNOWLEDGE,
+        "Tell me a joke about databases.": AgentRoute.OUT_OF_SCOPE,
     }
 
     async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
@@ -482,6 +483,12 @@ async def test_end_to_end_api_agent_retrieval_for_each_role() -> None:
                 headers=auth_headers(role),
             )
             finals[role] = parse_sse(response.text)[-1][1]
+        out_of_scope_response = await end_to_end_client.post(
+            "/v1/chat/stream",
+            json={"message": "Tell me a joke about databases."},
+            headers=auth_headers("analyst"),
+        )
+        out_of_scope = parse_sse(out_of_scope_response.text)[-1][1]
 
     await application.state.agent_runtime.close()
     await application.state.memory_runtime.close()
@@ -489,3 +496,6 @@ async def test_end_to_end_api_agent_retrieval_for_each_role() -> None:
 
     assert all(result["status"] in {"complete", "partial"} for result in finals.values())
     assert all(result["citations"] for result in finals.values())
+    assert out_of_scope["status"] == "complete"
+    assert out_of_scope["citations"] == []
+    assert "organizational assistant" in out_of_scope["answer"]

@@ -217,7 +217,9 @@ analysis, and enterprise lookups delegate to exactly three static specialists. E
 has a small code-enforced tool allowlist, while the central gateway continues to enforce RBAC,
 trusted scope, schemas, timeouts, and audit logging.
 
-The four bounded branches converge on one synthesis node. When enabled, that node uses LangChain
+The four operational branches and one no-tool `out_of_scope` branch converge on one synthesis node.
+Out-of-scope requests receive a fixed explanation of the assistant's approved duties. When enabled,
+the synthesis node uses LangChain
 structured output to produce grounded prose; deterministic synthesis can still be used for answers,
 but production routing always requires the model-backed supervisor.
 There is no second, unused agent harness. See [docs/agents.md](docs/agents.md).

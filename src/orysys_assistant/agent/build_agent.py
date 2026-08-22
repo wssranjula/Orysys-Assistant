@@ -82,7 +82,11 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
                     "for multi-source investigation, comparison, recurring patterns, or broad "
                     "synthesis; analysis for counts, percentages, trends, distributions, or other "
                     "structured aggregation; enterprise for employee directory, service catalog, "
-                    "ownership, on-call, or incident-system record lookups. Return only the "
+                    "ownership, on-call, or incident-system record lookups; out_of_scope for "
+                    "unrelated general knowledge, entertainment, personal advice, creative "
+                    "writing, or requests outside the assistant's approved read-only duties. "
+                    "Use out_of_scope for greetings and questions about what the assistant can do "
+                    "so they receive the capabilities response. Return only the "
                     "structured RouteDecision. The summary must be a short user-safe explanation, "
                     "not hidden reasoning."
                 ),

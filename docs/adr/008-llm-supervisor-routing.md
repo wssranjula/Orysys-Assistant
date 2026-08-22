@@ -13,7 +13,9 @@ did not contain a known trigger.
 
 Use a tool-free LangChain supervisor agent for routing. It receives the current request plus bounded
 thread context and must return a validated `RouteDecision` containing one `AgentRoute`, confidence,
-and a short user-safe summary. LangGraph maps the enum to existing code-controlled branches.
+and a short user-safe summary. LangGraph maps the enum to existing code-controlled branches. The
+`out_of_scope` branch calls no tools and returns a fixed explanation of supported duties for
+unrelated, casual, creative, or otherwise unsupported requests.
 
 Production requires a configured model credential and has no deterministic keyword fallback. Tests
 and offline contract checks may inject an `AgentRouter` implementation explicitly; dependency

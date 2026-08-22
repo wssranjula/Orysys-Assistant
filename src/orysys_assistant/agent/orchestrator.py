@@ -84,6 +84,7 @@ class RootOrchestrator:
         builder.add_node("research", self._research_node)
         builder.add_node("analysis", self._analysis_node)
         builder.add_node("enterprise", self._enterprise_node)
+        builder.add_node("out_of_scope", self._out_of_scope_node)
         builder.add_node("synthesize", self._synthesize_node)
         builder.add_edge(START, "route")
         builder.add_conditional_edges(
@@ -94,9 +95,16 @@ class RootOrchestrator:
                 AgentRoute.RESEARCH.value: "research",
                 AgentRoute.ANALYSIS.value: "analysis",
                 AgentRoute.ENTERPRISE.value: "enterprise",
+                AgentRoute.OUT_OF_SCOPE.value: "out_of_scope",
             },
         )
-        for node in ("direct_knowledge", "research", "analysis", "enterprise"):
+        for node in (
+            "direct_knowledge",
+            "research",
+            "analysis",
+            "enterprise",
+            "out_of_scope",
+        ):
             builder.add_edge(node, "synthesize")
         builder.add_edge("synthesize", END)
         return builder.compile(checkpointer=self._checkpointer)
@@ -280,11 +288,30 @@ class RootOrchestrator:
             )
         }
 
+    @staticmethod
+    def _out_of_scope_node(state: RootAgentState) -> dict[str, AgentExecutionResult]:
+        return {
+            "result": AgentExecutionResult(
+                route=AgentRoute.OUT_OF_SCOPE,
+                answer=(
+                    "I’m the Commercial Bank organizational assistant. I can help you:\n"
+                    "- find authorized information in internal policies, runbooks, incidents, "
+                    "architecture, product specifications, and meeting notes;\n"
+                    "- investigate and compare evidence across multiple internal sources;\n"
+                    "- calculate approved counts, percentages, distributions, and trends; and\n"
+                    "- look up approved employee, service-catalog, ownership, on-call, and "
+                    "incident records.\n\n"
+                    "I can’t help with unrelated general questions, entertainment, personal "
+                    "advice, or actions outside these approved read-only duties."
+                ),
+            )
+        }
+
     async def _synthesize_node(self, state: RootAgentState) -> dict[str, Any]:
         result = state["result"]
         if result is None:
             raise RuntimeError("The specialist node did not produce a result.")
-        if self._synthesizer is not None:
+        if self._synthesizer is not None and result.route is not AgentRoute.OUT_OF_SCOPE:
             evidence = "\n\n".join(
                 f"[{index}] {item.title}\n{unwrap_evidence(item.content)[:2_000]}"
                 for index, item in enumerate(result.evidence, start=1)
