@@ -60,7 +60,12 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
     answer = ""
     with (
         httpx.Client(timeout=httpx.Timeout(130, connect=5)) as client,
-        client.stream("POST", f"{API_BASE_URL}/v1/chat/stream", json=payload) as response,
+        client.stream(
+            "POST",
+            f"{API_BASE_URL}/v1/chat/stream",
+            json=payload,
+            headers={"Authorization": f"Bearer {st.session_state.access_token}"},
+        ) as response,
     ):
         if response.is_error:
             body = response.read().json()
@@ -85,6 +90,18 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
     return answer
 
 
+def login(username: str, password: str) -> dict[str, Any]:
+    with httpx.Client(timeout=httpx.Timeout(15, connect=5)) as client:
+        response = client.post(
+            f"{API_BASE_URL}/v1/auth/token",
+            json={"username": username, "password": password},
+        )
+    if response.is_error:
+        body = response.json()
+        raise RuntimeError(body.get("error", {}).get("message", "Authentication failed"))
+    return response.json()
+
+
 st.set_page_config(page_title="Commercial Bank AI Assistant", page_icon="🏦", layout="wide")
 st.title("Commercial Bank AI Assistant")
 st.caption("Phase 1 walking skeleton · streamed mock response with inspectable activity")
@@ -95,6 +112,36 @@ if "activities" not in st.session_state:
     st.session_state.activities = []
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = None
+if "access_token" not in st.session_state:
+    st.session_state.access_token = None
+if "identity" not in st.session_state:
+    st.session_state.identity = None
+
+if not st.session_state.access_token:
+    st.subheader("Sign in")
+    st.caption("Use one of the Phase 2 fictional Commercial Bank accounts.")
+    with st.form("login_form"):
+        username = st.text_input("Username", value="viewer@commercialbank.test")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", use_container_width=True)
+    if submitted:
+        try:
+            identity = login(username, password)
+        except (httpx.HTTPError, RuntimeError, json.JSONDecodeError) as exc:
+            st.error(str(exc))
+        else:
+            st.session_state.access_token = identity.pop("access_token")
+            st.session_state.identity = identity
+            st.rerun()
+    st.stop()
+
+with st.sidebar:
+    identity = st.session_state.identity
+    st.write(f"Signed in as **{identity['display_name']}**")
+    st.caption(f"Role: {identity['role'].title()}")
+    if st.button("Sign out", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
 
 chat_column, activity_column = st.columns([2, 1], gap="large")
 

@@ -4,11 +4,15 @@ from uuid import UUID
 
 from fastapi import APIRouter
 
+from orysys_assistant.api.dependencies import IdentityDependency
 from orysys_assistant.domain.models import ConversationSnapshot
 
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"])
 
 
 @router.get("/{conversation_id}", response_model=ConversationSnapshot)
-async def get_conversation(conversation_id: UUID) -> ConversationSnapshot:
+async def get_conversation(
+    conversation_id: UUID,
+    _: IdentityDependency,
+) -> ConversationSnapshot:
     return ConversationSnapshot(conversation_id=conversation_id)

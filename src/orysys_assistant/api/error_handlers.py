@@ -27,6 +27,7 @@ def _response(
     message: str,
     retryable: bool = False,
     details: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     envelope = ErrorEnvelope(
         error=ApiError(
@@ -37,11 +38,19 @@ def _response(
             details=details or {},
         )
     )
-    return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code,
+        content=envelope.model_dump(mode="json"),
+        headers=headers,
+    )
 
 
 async def application_error_handler(request: Request, exc: ApplicationError) -> JSONResponse:
     logger.warning("request_failed", error_type=exc.code, result="rejected")
+    headers = None
+    if exc.code == "rate_limit_exceeded":
+        retry_after = exc.details.get("retry_after_seconds", 1)
+        headers = {"Retry-After": str(retry_after)}
     return _response(
         request,
         status_code=exc.status_code,
@@ -49,6 +58,7 @@ async def application_error_handler(request: Request, exc: ApplicationError) -> 
         message=exc.message,
         retryable=exc.retryable,
         details=exc.details,
+        headers=headers,
     )
 
 

@@ -21,6 +21,20 @@ class Settings(BaseSettings):
     api_port: int = 8000
     ui_api_base_url: str = "http://localhost:8000"
 
+    auth_viewer_token: str = "phase2-viewer-demo-token"
+    auth_analyst_token: str = "phase2-analyst-demo-token"
+    auth_admin_token: str = "phase2-administrator-demo-token"
+    organization_id: str = "commercial-bank"
+    pinecone_namespace: str = "commercial-bank"
+    redis_url: str = "redis://localhost:6379/0"
+    rate_limit_backend: str = "redis"
+    rate_limit_viewer_capacity: int = Field(default=10, gt=0)
+    rate_limit_viewer_refill_per_minute: float = Field(default=5, gt=0)
+    rate_limit_analyst_capacity: int = Field(default=30, gt=0)
+    rate_limit_analyst_refill_per_minute: float = Field(default=15, gt=0)
+    rate_limit_administrator_capacity: int = Field(default=60, gt=0)
+    rate_limit_administrator_refill_per_minute: float = Field(default=30, gt=0)
+
     langsmith_tracing: bool = False
     langsmith_api_key: str | None = None
     langsmith_project: str = "commercial-bank-assistant"

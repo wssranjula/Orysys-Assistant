@@ -37,6 +37,12 @@ class RateLimitError(ApplicationError):
     retryable = True
 
 
+class RateLimitUnavailableError(ApplicationError):
+    code = "rate_limit_unavailable"
+    status_code = 503
+    retryable = True
+
+
 class RetrievalUnavailableError(ApplicationError):
     code = "retrieval_unavailable"
     status_code = 503

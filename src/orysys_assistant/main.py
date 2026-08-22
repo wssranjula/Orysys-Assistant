@@ -7,15 +7,28 @@ from fastapi import FastAPI
 
 from orysys_assistant.api.error_handlers import register_error_handlers
 from orysys_assistant.api.middleware import RequestContextMiddleware
-from orysys_assistant.api.routes import chat, conversations, feedback, health
+from orysys_assistant.api.routes import auth, chat, conversations, feedback, health
 from orysys_assistant.config import Settings, get_settings
 from orysys_assistant.observability.logging import configure_logging, get_logger
+from orysys_assistant.security.access_scope import AccessScopeService
+from orysys_assistant.security.authentication import AuthenticationService
+from orysys_assistant.security.authorization import AuthorizationPolicy
+from orysys_assistant.security.rate_limit import TokenBucketRateLimiter, build_rate_limiter
+from orysys_assistant.tools.gateway import ToolGateway
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    rate_limiter: TokenBucketRateLimiter | None = None,
+) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
     logger = get_logger()
+    authentication = AuthenticationService(resolved_settings)
+    access_scope_service = AccessScopeService(resolved_settings)
+    authorization_policy = AuthorizationPolicy()
+    resolved_rate_limiter = rate_limiter or build_rate_limiter(resolved_settings)
+    tool_gateway = ToolGateway(authorization_policy)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -25,6 +38,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             langsmith_tracing=resolved_settings.langsmith_enabled,
         )
         yield
+        await resolved_rate_limiter.close()
         logger.info("application_stopped")
 
     app = FastAPI(
@@ -33,9 +47,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.authentication = authentication
+    app.state.access_scope_service = access_scope_service
+    app.state.authorization_policy = authorization_policy
+    app.state.rate_limiter = resolved_rate_limiter
+    app.state.tool_gateway = tool_gateway
     app.add_middleware(RequestContextMiddleware)
     register_error_handlers(app)
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(chat.router)
     app.include_router(conversations.router)
     app.include_router(feedback.router)

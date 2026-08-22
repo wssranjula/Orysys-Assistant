@@ -2,11 +2,15 @@
 
 from fastapi import APIRouter, status
 
+from orysys_assistant.api.dependencies import IdentityDependency
 from orysys_assistant.domain.models import FeedbackAcknowledgement, FeedbackRequest
 
 router = APIRouter(prefix="/v1/feedback", tags=["feedback"])
 
 
 @router.post("", response_model=FeedbackAcknowledgement, status_code=status.HTTP_202_ACCEPTED)
-async def submit_feedback(_: FeedbackRequest) -> FeedbackAcknowledgement:
+async def submit_feedback(
+    _: FeedbackRequest,
+    _identity: IdentityDependency,
+) -> FeedbackAcknowledgement:
     return FeedbackAcknowledgement(accepted=True)

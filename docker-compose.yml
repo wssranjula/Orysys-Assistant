@@ -1,4 +1,13 @@
 services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
   api:
     build:
       context: .
@@ -6,11 +15,19 @@ services:
     environment:
       APP_ENV: development
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_BACKEND: redis
+      AUTH_VIEWER_TOKEN: ${AUTH_VIEWER_TOKEN:-phase2-viewer-demo-token}
+      AUTH_ANALYST_TOKEN: ${AUTH_ANALYST_TOKEN:-phase2-analyst-demo-token}
+      AUTH_ADMIN_TOKEN: ${AUTH_ADMIN_TOKEN:-phase2-administrator-demo-token}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-commercial-bank-assistant}
     ports:
       - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
       interval: 5s
@@ -28,4 +45,3 @@ services:
     depends_on:
       api:
         condition: service_healthy
-

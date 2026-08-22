@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 class StrictModel(BaseModel):
@@ -139,3 +139,16 @@ class FeedbackAcknowledgement(StrictModel):
 class HealthResponse(StrictModel):
     status: str
     components: dict[str, str] = Field(default_factory=dict)
+
+
+class LoginRequest(StrictModel):
+    username: str = Field(min_length=3, max_length=254)
+    password: SecretStr
+
+
+class TokenResponse(StrictModel):
+    access_token: str
+    token_type: str = "bearer"
+    user_id: str
+    display_name: str
+    role: Role

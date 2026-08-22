@@ -11,7 +11,10 @@ import structlog
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
-from orysys_assistant.api.dependencies import SettingsDependency
+from orysys_assistant.api.dependencies import (
+    SettingsDependency,
+    TrustedChatContextDependency,
+)
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.models import (
     ActivityEvent,
@@ -24,6 +27,7 @@ from orysys_assistant.domain.models import (
 )
 from orysys_assistant.observability.logging import get_logger
 from orysys_assistant.observability.tracing import run_traced_mock_agent
+from orysys_assistant.security.models import TrustedRequestContext
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
 logger = get_logger()
@@ -69,14 +73,42 @@ async def stream_chat_events(
     request: Request,
     payload: ChatRequest,
     settings: Settings,
+    context: TrustedRequestContext,
 ) -> AsyncIterator[dict[str, str]]:
     request_id: UUID = request.state.request_id
     conversation_id = payload.conversation_id or uuid4()
     started = perf_counter()
-    structlog.contextvars.bind_contextvars(conversation_id=str(conversation_id))
+    structlog.contextvars.bind_contextvars(
+        conversation_id=str(conversation_id),
+        user_id=context.identity.user_id,
+        role=context.identity.role.value,
+    )
 
     try:
         await _ensure_connected(request)
+        yield _sse(
+            "activity",
+            _activity(
+                event_type=ActivityEventType.AUTHENTICATION_COMPLETED,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.COMPLETED,
+                message=f"Authenticated as {context.identity.role.value}.",
+                node="authentication",
+            ),
+        )
+        yield _sse(
+            "activity",
+            _activity(
+                event_type=ActivityEventType.RATE_LIMIT_CHECKED,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.COMPLETED,
+                message="Per-user request budget available.",
+                node="rate_limit",
+                metadata={"remaining": context.rate_limit_remaining},
+            ),
+        )
         yield _sse(
             "activity",
             _activity(
@@ -214,9 +246,10 @@ async def stream_chat(
     request: Request,
     payload: ChatRequest,
     settings: SettingsDependency,
+    context: TrustedChatContextDependency,
 ) -> EventSourceResponse:
     return EventSourceResponse(
-        stream_chat_events(request, payload, settings),
+        stream_chat_events(request, payload, settings, context),
         ping=15,
         headers={
             "Cache-Control": "no-cache, no-transform",
