@@ -15,8 +15,8 @@ rate_limits:
     refill_per_minute: 30
 
 retrieval:
-  candidate_limit_per_mode: 30
-  final_chunk_limit: 12
+  candidate_count: 20
+  final_count: 6
   max_chunk_characters: 6000
   dense_weight: 0.65
   sparse_weight: 0.35
@@ -45,4 +45,3 @@ retries:
   llm: 1
   retrieval: 1
   mcp: 0
-

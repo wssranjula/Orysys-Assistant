@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     auth_admin_token: str = "phase2-administrator-demo-token"
     organization_id: str = "commercial-bank"
     pinecone_namespace: str = "commercial-bank"
+    pinecone_api_key: str | None = None
+    pinecone_index: str = "commercial-bank-assistant"
+    pinecone_host: str | None = None
+    retrieval_backend: str = "memory"
+    retrieval_dense_weight: float = Field(default=0.65, ge=0, le=1)
+    retrieval_sparse_weight: float = Field(default=0.35, ge=0, le=1)
+    retrieval_candidate_count: int = Field(default=20, gt=0, le=100)
+    retrieval_final_count: int = Field(default=6, gt=0, le=20)
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimension: int = Field(default=1536, gt=0)
     redis_url: str = "redis://localhost:6379/0"
     rate_limit_backend: str = "redis"
     rate_limit_viewer_capacity: int = Field(default=10, gt=0)
@@ -38,6 +48,8 @@ class Settings(BaseSettings):
     langsmith_tracing: bool = False
     langsmith_api_key: str | None = None
     langsmith_project: str = "commercial-bank-assistant"
+    openai_api_key: str | None = None
+    embedding_provider: str = "openai"
 
     mock_token_delay_seconds: float = Field(default=0.025, ge=0, le=2)
 
