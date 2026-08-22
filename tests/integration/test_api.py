@@ -1,12 +1,12 @@
 import json
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 
+from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute
 from orysys_assistant.config import Settings
 from orysys_assistant.main import create_app
 
@@ -17,13 +17,42 @@ TOKENS = {
 }
 
 
+class FakeOrchestrator:
+    name = "test_root_agent"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, message: str, context: Any, transition_sink: Any = None) -> Any:
+        self.calls += 1
+        return AgentExecutionResult(
+            route=AgentRoute.DIRECT_KNOWLEDGE,
+            answer=f"Grounded test answer for: {message}",
+            warnings=["Test runtime uses fixture evidence."],
+        )
+
+
+class FakeAgentRuntime:
+    def __init__(self) -> None:
+        self.orchestrator = FakeOrchestrator()
+
+    async def get_orchestrator(self) -> FakeOrchestrator:
+        return self.orchestrator
+
+
+def install_fake_agent(app: Any) -> FakeAgentRuntime:
+    runtime = FakeAgentRuntime()
+    app.state.agent_runtime = runtime
+    return runtime
+
+
 def auth_headers(role: str = "viewer") -> dict[str, str]:
     return {"Authorization": f"Bearer {TOKENS[role]}"}
 
 
 @pytest.fixture
 def app() -> Any:
-    return create_app(
+    application = create_app(
         Settings(
             langsmith_tracing=False,
             mock_token_delay_seconds=0,
@@ -32,6 +61,8 @@ def app() -> Any:
             _env_file=None,
         )
     )
+    install_fake_agent(application)
+    return application
 
 
 @pytest.fixture
@@ -68,7 +99,7 @@ async def test_health_endpoints(client: httpx.AsyncClient) -> None:
     assert live.json() == {"status": "ok", "components": {}}
     assert ready.status_code == 200
     assert ready.json()["components"] == {
-        "mock_agent": "ready",
+        "root_agent": "ready",
         "rate_limiter": "ready",
     }
     UUID(live.headers["X-Request-ID"])
@@ -137,13 +168,9 @@ async def test_placeholder_conversation_and_feedback_contracts(
 
 @pytest.mark.asyncio
 async def test_login_and_missing_token_contract(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: httpx.AsyncClient, app: Any
 ) -> None:
-    mock_agent = AsyncMock(return_value="should not run")
-    monkeypatch.setattr(
-        "orysys_assistant.api.routes.chat.run_traced_mock_agent",
-        mock_agent,
-    )
+    runtime = app.state.agent_runtime
     login = await client.post(
         "/v1/auth/token",
         json={
@@ -159,7 +186,7 @@ async def test_login_and_missing_token_contract(
     assert unauthenticated.status_code == 401
     assert unauthenticated.json()["error"]["code"] == "authentication_failed"
     assert "text/event-stream" not in unauthenticated.headers.get("content-type", "")
-    mock_agent.assert_not_awaited()
+    assert runtime.orchestrator.calls == 0
 
 
 @pytest.mark.asyncio
@@ -177,12 +204,7 @@ async def test_bad_password_uses_generic_authentication_error(client: httpx.Asyn
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_returns_429_and_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
-    mock_agent = AsyncMock(return_value="mock answer")
-    monkeypatch.setattr(
-        "orysys_assistant.api.routes.chat.run_traced_mock_agent",
-        mock_agent,
-    )
+async def test_rate_limit_returns_429_and_retry_after() -> None:
     settings = Settings(
         rate_limit_backend="memory",
         rate_limit_viewer_capacity=1,
@@ -193,6 +215,7 @@ async def test_rate_limit_returns_429_and_retry_after(monkeypatch: pytest.Monkey
         _env_file=None,
     )
     app = create_app(settings)
+    runtime = install_fake_agent(app)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as limited_client:
         first = await limited_client.post(
@@ -206,4 +229,4 @@ async def test_rate_limit_returns_429_and_retry_after(monkeypatch: pytest.Monkey
     assert second.status_code == 429
     assert int(second.headers["Retry-After"]) > 0
     assert second.json()["error"]["code"] == "rate_limit_exceeded"
-    assert mock_agent.await_count == 1
+    assert runtime.orchestrator.calls == 1

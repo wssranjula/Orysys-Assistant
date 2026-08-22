@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 
+from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute
 from orysys_assistant.api.routes.chat import stream_chat_events
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.models import ChatRequest, Role
@@ -17,6 +18,16 @@ class DisconnectingRequest:
     async def is_disconnected(self) -> bool:
         self.checks += 1
         return self.checks >= 2
+
+
+class FakeOrchestrator:
+    name = "test_root_agent"
+
+    async def run(self, message: str, context: object, transition_sink: object) -> object:
+        return AgentExecutionResult(
+            route=AgentRoute.DIRECT_KNOWLEDGE,
+            answer=message,
+        )
 
 
 @pytest.mark.asyncio
@@ -47,6 +58,7 @@ async def test_stream_stops_without_final_event_after_disconnect() -> None:
             ChatRequest(message="disconnect this stream"),
             settings,
             context,
+            FakeOrchestrator(),  # type: ignore[arg-type]
         )
     ]
 
