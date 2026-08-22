@@ -1,0 +1,48 @@
+api:
+  max_message_characters: 8000
+  max_response_characters: 20000
+  request_timeout_seconds: 120
+
+rate_limits:
+  viewer:
+    capacity: 10
+    refill_per_minute: 5
+  analyst:
+    capacity: 30
+    refill_per_minute: 15
+  administrator:
+    capacity: 60
+    refill_per_minute: 30
+
+retrieval:
+  candidate_limit_per_mode: 30
+  final_chunk_limit: 12
+  max_chunk_characters: 6000
+  dense_weight: 0.65
+  sparse_weight: 0.35
+  timeout_seconds: 15
+
+research:
+  max_initial_tasks: 4
+  max_followup_tasks: 2
+  max_recursion_depth: 2
+  max_parallel_workers: 3
+  max_total_tool_calls: 20
+  max_chunks_per_worker: 6
+  worker_timeout_seconds: 25
+  overall_timeout_seconds: 90
+
+tools:
+  default_timeout_seconds: 10
+  max_result_bytes: 100000
+  max_analysis_records: 1000
+
+memory:
+  max_recent_messages: 20
+  max_summary_characters: 8000
+
+retries:
+  llm: 1
+  retrieval: 1
+  mcp: 0
+

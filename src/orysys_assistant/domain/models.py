@@ -1,0 +1,110 @@
+"""Public API and event contracts frozen during Phase 0."""
+
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class StrictModel(BaseModel):
+    """Base model that rejects accidental contract expansion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class Role(StrEnum):
+    VIEWER = "viewer"
+    ANALYST = "analyst"
+    ADMINISTRATOR = "administrator"
+
+
+class ResponseStatus(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    FAILED = "failed"
+
+
+class ActivityStatus(StrEnum):
+    STARTED = "started"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    DEGRADED = "degraded"
+    DENIED = "denied"
+    FAILED = "failed"
+
+
+class ActivityEventType(StrEnum):
+    REQUEST_RECEIVED = "request_received"
+    AUTHENTICATION_COMPLETED = "authentication_completed"
+    RATE_LIMIT_CHECKED = "rate_limit_checked"
+    AGENT_STARTED = "agent_started"
+    SUBAGENT_STARTED = "subagent_started"
+    RETRIEVAL_STARTED = "retrieval_started"
+    RETRIEVAL_COMPLETED = "retrieval_completed"
+    TOOL_STARTED = "tool_started"
+    TOOL_COMPLETED = "tool_completed"
+    TOOL_DENIED = "tool_denied"
+    MEMORY_UPDATED = "memory_updated"
+    VALIDATION_STARTED = "validation_started"
+    VALIDATION_FAILED = "validation_failed"
+    ANSWER_STREAMING = "answer_streaming"
+    REQUEST_COMPLETED = "request_completed"
+    REQUEST_FAILED = "request_failed"
+
+
+class ChatRequest(StrictModel):
+    message: str = Field(min_length=1, max_length=8_000)
+    conversation_id: UUID | None = None
+
+
+class Citation(StrictModel):
+    citation_id: str = Field(min_length=1, max_length=20)
+    evidence_id: str = Field(min_length=1, max_length=100)
+    document_id: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=500)
+    chunk_id: str = Field(min_length=1, max_length=250)
+    source_path: str = Field(min_length=1, max_length=1_000)
+
+
+class ActivityEvent(StrictModel):
+    event_type: ActivityEventType
+    request_id: UUID
+    conversation_id: UUID
+    status: ActivityStatus
+    message: str = Field(min_length=1, max_length=500)
+    agent: str | None = Field(default=None, max_length=100)
+    node: str | None = Field(default=None, max_length=100)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class AnswerDelta(StrictModel):
+    request_id: UUID
+    conversation_id: UUID
+    sequence: int = Field(ge=0)
+    text: str = Field(min_length=1)
+
+
+class FinalResponse(StrictModel):
+    request_id: UUID
+    conversation_id: UUID
+    status: ResponseStatus
+    answer: str = Field(max_length=20_000)
+    citations: list[Citation] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    degraded: bool = False
+
+
+class ApiError(StrictModel):
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    message: str = Field(min_length=1, max_length=500)
+    request_id: UUID
+    retryable: bool = False
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class ErrorEnvelope(StrictModel):
+    error: ApiError
