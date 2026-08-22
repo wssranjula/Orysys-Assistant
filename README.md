@@ -5,14 +5,14 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 3 complete — authenticated walking skeleton plus a tested hybrid
-> evidence layer.** The chat agent remains a deterministic mock until orchestration is introduced
-> in Phase 4.
+> Current status: **Phase 4 complete — authenticated hybrid retrieval plus controlled root-agent
+> routing and three tool-scoped specialists.** Complex recursive research remains bounded for
+> Phase 5.
 
 ## POC scope
 
 The POC supports one fictional organization (`commercial-bank`), three hardcoded users and
-roles, six read-only tools, and four document categories. It answers general knowledge
+roles, six read-only tools, and six document categories. It answers general knowledge
 questions, performs bounded incident research and structured analysis, maintains context
 within a conversation, and emits inspectable activity events. Authorization, access filters,
 execution limits, citation validation, and rate limiting are deterministic platform controls.
@@ -57,7 +57,7 @@ bounded LangGraph subgraph. See [docs/architecture.md](docs/architecture.md) and
 src/orysys_assistant/  application package and deterministic domain contracts
 ui/                    Streamlit frontend (Phase 1)
 mcp_server/            read-only mock enterprise MCP server (Phase 7)
-skills/                reusable agent instructions (later phases)
+skills/                four focused agent instruction packages
 data/                   sample documents and golden acceptance cases
 config/                 non-secret policy and execution defaults
 tests/                  unit, graph, integration, and end-to-end suites
@@ -116,8 +116,8 @@ Do not commit `.env` or secrets.
 ### LangSmith tracing
 
 Set `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and optionally `LANGSMITH_PROJECT` in `.env`.
-Each chat request creates a `phase1-mock-agent` run tagged `phase-1` and `walking-skeleton`.
-Tracing is disabled safely when no key/configuration is supplied.
+Root routing, retrieval, and each delegation boundary are decorated as LangSmith runs. Tracing is
+disabled safely when no key/configuration is supplied.
 
 ### Phase 1 behavior
 
@@ -137,7 +137,7 @@ Tracing is disabled safely when no key/configuration is supplied.
 - All tool execution must pass through the typed gateway for allowlist, RBAC, reserved-field
   rejection, schema validation, timeout, result-size limit, and audit logging.
 - Redis executes the per-user token bucket atomically, so limits are shared by API instances.
-- Authentication and rate-limit denials happen before the mock agent and return consistent
+- Authentication and rate-limit denials happen before the root agent and return consistent
   `401`, `403`, or `429` envelopes.
 
 ### Phase 3 corpus and retrieval
@@ -167,13 +167,26 @@ queries asynchronously inside the trusted organization namespace, fuses normaliz
 the configured 0.65/0.35 weights, and returns attributed evidence. See
 [docs/retrieval.md](docs/retrieval.md).
 
+### Phase 4 agent orchestration
+
+The API now uses a deterministic, auditable intent router in front of one root orchestrator.
+Focused questions use authorized knowledge search directly; multi-document research, structured
+analysis, and enterprise lookups delegate to exactly three static specialists. Every specialist
+has a small code-enforced tool allowlist, while the central gateway continues to enforce RBAC,
+trusted scope, schemas, timeouts, and audit logging.
+
+A provider-backed Deep Agents graph factory is also included with default filesystem and shell
+tools excluded, the general-purpose subagent disabled, three declarative specialists, and the four
+skills under `skills/`. Phase 4 keeps API routing deterministic; Phase 5 will add the compiled,
+bounded recursive research graph. See [docs/agents.md](docs/agents.md).
+
 ## Delivery roadmap
 
 1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
 2. Phase 1 — complete: FastAPI/Streamlit streaming walking skeleton
 3. Phase 2 — complete: authentication, authorization, tool gateway, and Redis rate limiting
 4. Phase 3 — complete: sample corpus, ingestion, and hybrid Pinecone retrieval
-5. Phase 4 — root Deep Agent and specialized agents
+5. Phase 4 — complete: controlled root agent, three specialists, skills, and delegation traces
 6. Phase 5 — bounded recursive LangGraph research workflow
 7. Phase 6+ — memory, MCP/analysis tools, hardening, observability, and deployment
 
