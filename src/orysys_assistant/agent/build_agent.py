@@ -10,7 +10,7 @@ from pydantic import SecretStr
 from orysys_assistant.agent.models import GroundedAnswerDraft
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.agent.research_graph import ResearchLimits
-from orysys_assistant.agent.router import IntentRouter
+from orysys_assistant.agent.router import AgentRouter, LLMIntentRouter, RouteDecision
 from orysys_assistant.agent.subagents import (
     AnalysisSubagent,
     EnterpriseToolSubagent,
@@ -26,6 +26,7 @@ class AgentDependencies:
     gateway: ToolGateway
     settings: Settings | None = None
     checkpointer: Any = None
+    router: AgentRouter | None = None
 
 
 def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator:
@@ -55,15 +56,51 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
             ),
         )
     )
+    model = None
+    router = dependencies.router
+    if router is None:
+        if not settings.openai_api_key:
+            raise RuntimeError(
+                "The LLM supervisor requires OPENAI_API_KEY; no deterministic routing fallback "
+                "is enabled."
+            )
+        model = ChatOpenAI(
+            model=settings.agent_model,
+            api_key=SecretStr(settings.openai_api_key),
+            max_retries=settings.llm_retry_attempts,
+            timeout=settings.request_timeout_seconds,
+        )
+        router = LLMIntentRouter(
+            create_agent(
+                model=model,
+                tools=[],
+                response_format=RouteDecision,
+                system_prompt=(
+                    "You are the supervisor for an enterprise knowledge assistant. Select exactly "
+                    "one route based on the user's intent and conversation context: "
+                    "direct_knowledge for a focused policy or factual knowledge lookup; research "
+                    "for multi-source investigation, comparison, recurring patterns, or broad "
+                    "synthesis; analysis for counts, percentages, trends, distributions, or other "
+                    "structured aggregation; enterprise for employee directory, service catalog, "
+                    "ownership, on-call, or incident-system record lookups. Return only the "
+                    "structured RouteDecision. The summary must be a short user-safe explanation, "
+                    "not hidden reasoning."
+                ),
+                name="supervisor-router",
+            )
+        )
+
     synthesizer = None
     if settings.agent_synthesis_enabled and settings.openai_api_key:
-        synthesizer = create_agent(
-            model=ChatOpenAI(
+        if model is None:
+            model = ChatOpenAI(
                 model=settings.agent_model,
                 api_key=SecretStr(settings.openai_api_key),
                 max_retries=settings.llm_retry_attempts,
                 timeout=settings.request_timeout_seconds,
-            ),
+            )
+        synthesizer = create_agent(
+            model=model,
             tools=[],
             response_format=GroundedAnswerDraft,
             system_prompt=(
@@ -74,7 +111,7 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
             name="grounded-answer-synthesizer",
         )
     return RootOrchestrator(
-        router=IntentRouter(),
+        router=router,
         direct_toolbox=direct,
         research=research,
         analysis=analysis,

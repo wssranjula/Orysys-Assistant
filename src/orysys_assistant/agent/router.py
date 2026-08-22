@@ -1,42 +1,41 @@
-"""Auditable deterministic intent routing used before model autonomy."""
+"""Model-backed supervisor routing with a strict structured decision contract."""
 
-import re
+from typing import Any, Protocol
 
 from langsmith import traceable
+from pydantic import Field
 
-from orysys_assistant.agent.models import AgentRoute
+from orysys_assistant.agent.models import AgentModel, AgentRoute
 
 
-class IntentRouter:
-    _enterprise_patterns = (
-        r"\b(owner|ownership|employee directory|service catalogue|service catalog)\b",
-        r"\b(who owns|on-call|contact for)\b",
-        r"\b(?:emp-[0-9]{3}|svc-[a-z]+-[0-9]{3}|inc-[0-9]{4}-[0-9]{3})\b",
-    )
-    _analysis_patterns = (
-        r"\b(count|group|distribution|percentage|frequency|trend)\b",
-        r"\b(by root cause|how many|breakdown)\b",
-    )
-    _research_patterns = (
-        r"\b(all|across|recurring|compare|investigate|last year|multiple)\b",
-        r"\b(summarize.+incidents|outages.+root causes|multi-document)\b",
-    )
+class RouteDecision(AgentModel):
+    route: AgentRoute
+    confidence: float = Field(ge=0, le=1)
+    summary: str = Field(min_length=1, max_length=200)
+
+
+class AgentRouter(Protocol):
+    async def route(self, question: str, conversation_context: str = "") -> RouteDecision: ...
+
+
+class LLMIntentRouter:
+    """Ask a supervisor agent to select one code-controlled graph branch."""
+
+    def __init__(self, agent: Any) -> None:
+        self._agent = agent
 
     @traceable(
-        name="root-intent-routing",
+        name="llm-supervisor-routing",
         run_type="chain",
-        metadata={"agent": "root_deep_agent", "operation": "routing"},
+        metadata={"agent": "supervisor", "operation": "routing"},
     )
-    def route(self, question: str) -> AgentRoute:
-        normalized = " ".join(question.lower().split())
-        if self._matches(normalized, self._enterprise_patterns):
-            return AgentRoute.ENTERPRISE
-        if self._matches(normalized, self._analysis_patterns):
-            return AgentRoute.ANALYSIS
-        if self._matches(normalized, self._research_patterns):
-            return AgentRoute.RESEARCH
-        return AgentRoute.DIRECT_KNOWLEDGE
-
-    @staticmethod
-    def _matches(value: str, patterns: tuple[str, ...]) -> bool:
-        return any(re.search(pattern, value) for pattern in patterns)
+    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
+        prompt = (
+            f"Current user request:\n{question}\n\n"
+            "Relevant prior conversation context:\n"
+            f"{conversation_context or 'No prior context.'}"
+        )
+        result = await self._agent.ainvoke(
+            {"messages": [{"role": "user", "content": prompt}]}
+        )
+        return RouteDecision.model_validate(result["structured_response"])

@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
+from orysys_assistant.agent.router import RouteDecision
 from orysys_assistant.api.routes import chat as chat_routes
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.models import Citation
@@ -19,6 +20,22 @@ TOKENS = {
     "analyst": "phase2-analyst-demo-token",
     "administrator": "phase2-administrator-demo-token",
 }
+
+
+class ScenarioRouter:
+    routes = {
+        "What does the remote-work policy allow?": AgentRoute.DIRECT_KNOWLEDGE,
+        "Count incidents by document type.": AgentRoute.ANALYSIS,
+        "Explain the restricted fraud investigation playbook.": AgentRoute.DIRECT_KNOWLEDGE,
+    }
+
+    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
+        route = self.routes[question]
+        return RouteDecision(
+            route=route,
+            confidence=1,
+            summary=f"Fixture supervisor selected {route.value}.",
+        )
 
 
 class FakeOrchestrator:
@@ -449,7 +466,7 @@ async def test_end_to_end_api_agent_retrieval_for_each_role() -> None:
         log_level="WARNING",
         _env_file=None,
     )
-    application = create_app(settings)
+    application = create_app(settings, agent_router=ScenarioRouter())
     transport = httpx.ASGITransport(app=application)
     scenarios = {
         "viewer": "What does the remote-work policy allow?",

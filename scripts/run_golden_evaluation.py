@@ -10,8 +10,7 @@ from typing import Any
 
 import httpx
 
-from orysys_assistant.agent.models import AgentExecutionResult, AgentTransition
-from orysys_assistant.agent.router import IntentRouter
+from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import RetrievalUnavailableError
 from orysys_assistant.evaluation.models import ScenarioObservation
@@ -40,7 +39,7 @@ class FaultInjectingOrchestrator:
     async def run(self, question: str, *args: Any, **kwargs: Any) -> AgentExecutionResult:
         if "production database failover procedure" in question.lower():
             sink = args[1] if len(args) > 1 else kwargs.get("transition_sink")
-            route = IntentRouter().route(question)
+            route = AgentRoute.DIRECT_KNOWLEDGE
             if sink is not None:
                 await sink(
                     AgentTransition(
@@ -101,7 +100,6 @@ class ApiScenarioExecutor:
             mcp_retry_attempts=1,
             mock_token_delay_seconds=0,
             log_level="WARNING",
-            _env_file=None,
         )
         self.app = create_app(settings, enterprise_client=SlowEnterpriseClient())
         self.client = httpx.AsyncClient(
@@ -157,7 +155,6 @@ class ApiScenarioExecutor:
             rate_limit_viewer_refill_per_minute=0.001,
             mock_token_delay_seconds=0,
             log_level="WARNING",
-            _env_file=None,
         )
         app = create_app(settings)
         client = httpx.AsyncClient(

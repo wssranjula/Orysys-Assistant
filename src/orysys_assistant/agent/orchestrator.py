@@ -22,7 +22,7 @@ from orysys_assistant.agent.models import (
     GroundedAnswerDraft,
     ResearchExecution,
 )
-from orysys_assistant.agent.router import IntentRouter
+from orysys_assistant.agent.router import AgentRouter
 from orysys_assistant.agent.subagents import (
     AnalysisSubagent,
     EnterpriseToolSubagent,
@@ -60,7 +60,7 @@ class RootOrchestrator:
     def __init__(
         self,
         *,
-        router: IntentRouter,
+        router: AgentRouter,
         direct_toolbox: ScopedToolbox,
         research: ResearchSubagent,
         analysis: AnalysisSubagent,
@@ -187,10 +187,12 @@ class RootOrchestrator:
                 agent=self.name,
                 node="intent_routing",
                 status="started",
-                message="Root agent is classifying the request.",
+                message="Supervisor agent is classifying the request.",
             ),
         )
-        route = self._router.route(state["question"])
+        summary = runtime.context.conversation_summary or self._message_history(state["messages"])
+        decision = await self._router.route(state["question"], summary)
+        route = decision.route
         await self._emit(
             runtime.context.transition_sink,
             AgentTransition(
@@ -201,11 +203,11 @@ class RootOrchestrator:
                 message=f"Selected {route.value} route.",
                 metadata={
                     "route": route.value,
-                    "plan_summary": self._plan_summary(route),
+                    "plan_summary": decision.summary,
+                    "routing_confidence": decision.confidence,
                 },
             ),
         )
-        summary = runtime.context.conversation_summary or self._message_history(state["messages"])
         return {
             "route": route,
             "question": self._with_conversation_context(
@@ -578,12 +580,3 @@ class RootOrchestrator:
         if remaining <= 0:
             return question
         return f"{question}{separator}{summary[-remaining:]}"
-
-    @staticmethod
-    def _plan_summary(route: AgentRoute) -> str:
-        return {
-            AgentRoute.DIRECT_KNOWLEDGE: "Search authorized knowledge and validate citations.",
-            AgentRoute.RESEARCH: "Delegate bounded multi-source research, then validate findings.",
-            AgentRoute.ANALYSIS: "Retrieve authorized records and run controlled analysis.",
-            AgentRoute.ENTERPRISE: "Call one approved read-only enterprise tool with fallback.",
-        }[route]

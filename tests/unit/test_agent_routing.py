@@ -9,7 +9,7 @@ from orysys_assistant.agent.build_agent import (
 )
 from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
 from orysys_assistant.agent.orchestrator import RootOrchestrator
-from orysys_assistant.agent.router import IntentRouter
+from orysys_assistant.agent.router import LLMIntentRouter, RouteDecision
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import AuthorizationError
@@ -44,6 +44,22 @@ def context(role: Role) -> TrustedRequestContext:
     )
 
 
+class TestRouter:
+    routes = {
+        "What is the remote working policy?": AgentRoute.DIRECT_KNOWLEDGE,
+        "Investigate payment outages across the last year.": AgentRoute.RESEARCH,
+        "Count payment incidents by root cause.": AgentRoute.ANALYSIS,
+        "Who owns the payment service?": AgentRoute.ENTERPRISE,
+        "Investigate recurring payment incidents across sources.": AgentRoute.RESEARCH,
+    }
+
+    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
+        route = self.routes.get(question, AgentRoute.DIRECT_KNOWLEDGE)
+        return RouteDecision(
+            route=route,
+            confidence=1,
+            summary=f"Test supervisor selected {route.value}.",
+        )
 def test_conversation_context_fits_the_knowledge_search_contract() -> None:
     question = "Were there any incidents related to attachments?"
     summary = "older context " * 1_000 + "most recent attachment discussion"
@@ -63,9 +79,46 @@ def test_long_current_question_is_bounded_without_conversation_context() -> None
     assert KnowledgeSearchInput(query=query).query == query
 
 
-@pytest.mark.parametrize("question", ["Show EMP-001", "Look up INC-2025-001"])
-def test_enterprise_identifiers_route_without_keyword_hints(question: str) -> None:
-    assert IntentRouter().route(question) is AgentRoute.ENTERPRISE
+@pytest.mark.asyncio
+async def test_llm_router_validates_the_supervisor_structured_decision() -> None:
+    class FakeRoutingAgent:
+        def __init__(self) -> None:
+            self.request: dict[str, Any] = {}
+
+        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
+            self.request = request
+            return {
+                "structured_response": {
+                    "route": "research",
+                    "confidence": 0.87,
+                    "summary": "Compare multiple sources before answering.",
+                }
+            }
+
+    agent = FakeRoutingAgent()
+    decision = await LLMIntentRouter(agent).route(
+        "Would the same control apply to both historical incidents?",
+        "The prior turn discussed two payment services.",
+    )
+
+    assert decision.route is AgentRoute.RESEARCH
+    assert decision.confidence == 0.87
+    prompt = agent.request["messages"][0]["content"]
+    assert "historical incidents" in prompt
+    assert "two payment services" in prompt
+
+
+def test_production_factory_has_no_deterministic_router_fallback() -> None:
+    settings = Settings(
+        openai_api_key=None,
+        agent_synthesis_enabled=False,
+        _env_file=None,
+    )
+
+    with pytest.raises(RuntimeError, match="LLM supervisor requires OPENAI_API_KEY"):
+        build_root_orchestrator(
+            AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings)
+        )
 
 
 async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
@@ -77,7 +130,7 @@ async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
     gateway.register(python_analysis_spec(1_000))
     for spec in enterprise_tool_specs(InMemoryEnterpriseClient(), 1, 100_000):
         gateway.register(spec)
-    return build_root_orchestrator(AgentDependencies(gateway)), runtime
+    return build_root_orchestrator(AgentDependencies(gateway, router=TestRouter())), runtime
 
 
 @pytest.mark.asyncio
@@ -195,7 +248,7 @@ async def test_agent_tool_surface_denies_unapproved_tool_before_gateway() -> Non
 
 def test_production_orchestrator_is_a_compiled_langgraph() -> None:
     gateway = ToolGateway(AuthorizationPolicy())
-    orchestrator = build_root_orchestrator(AgentDependencies(gateway))
+    orchestrator = build_root_orchestrator(AgentDependencies(gateway, router=TestRouter()))
 
     assert type(orchestrator.graph).__name__ == "CompiledStateGraph"
     assert {
