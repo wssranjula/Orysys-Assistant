@@ -7,6 +7,7 @@ from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute
 from orysys_assistant.api.routes.chat import stream_chat_events
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.models import ChatRequest, Role
+from orysys_assistant.memory.repository import InMemoryConversationRepository
 from orysys_assistant.security.models import AccessScope, TrustedRequestContext, UserIdentity
 
 
@@ -23,7 +24,14 @@ class DisconnectingRequest:
 class FakeOrchestrator:
     name = "test_root_agent"
 
-    async def run(self, message: str, context: object, transition_sink: object) -> object:
+    async def run(
+        self,
+        message: str,
+        context: object,
+        transition_sink: object,
+        conversation_summary: str = "",
+        thread_id: str | None = None,
+    ) -> object:
         return AgentExecutionResult(
             route=AgentRoute.DIRECT_KNOWLEDGE,
             answer=message,
@@ -50,6 +58,8 @@ async def test_stream_stops_without_final_event_after_disconnect() -> None:
         ),
         rate_limit_remaining=9,
     )
+    repository = InMemoryConversationRepository(20, 8_000)
+    conversation = await repository.get_or_create(uuid4(), context.identity.user_id)
 
     events = [
         event
@@ -59,6 +69,8 @@ async def test_stream_stops_without_final_event_after_disconnect() -> None:
             settings,
             context,
             FakeOrchestrator(),  # type: ignore[arg-type]
+            repository,
+            conversation,
         )
     ]
 

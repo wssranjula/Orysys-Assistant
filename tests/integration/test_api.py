@@ -22,9 +22,20 @@ class FakeOrchestrator:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.summaries: list[str] = []
+        self.thread_ids: list[str | None] = []
 
-    async def run(self, message: str, context: Any, transition_sink: Any = None) -> Any:
+    async def run(
+        self,
+        message: str,
+        context: Any,
+        transition_sink: Any = None,
+        conversation_summary: str = "",
+        thread_id: str | None = None,
+    ) -> Any:
         self.calls += 1
+        self.summaries.append(conversation_summary)
+        self.thread_ids.append(thread_id)
         return AgentExecutionResult(
             route=AgentRoute.DIRECT_KNOWLEDGE,
             answer=f"Grounded test answer for: {message}",
@@ -158,7 +169,7 @@ async def test_placeholder_conversation_and_feedback_contracts(
     )
 
     assert conversation.status_code == 200
-    assert conversation.json()["persistence"] == "not_available_in_phase_1"
+    assert conversation.json()["persistence"] == "in_memory"
     assert feedback.status_code == 202
     assert feedback.json() == {
         "accepted": True,
@@ -167,9 +178,39 @@ async def test_placeholder_conversation_and_feedback_contracts(
 
 
 @pytest.mark.asyncio
-async def test_login_and_missing_token_contract(
+async def test_multi_turn_memory_survives_requests_and_enforces_owner(
     client: httpx.AsyncClient, app: Any
 ) -> None:
+    first = await client.post(
+        "/v1/chat/stream",
+        json={"message": "First memory turn"},
+        headers=auth_headers("analyst"),
+    )
+    first_final = parse_sse(first.text)[-1][1]
+    conversation_id = first_final["conversation_id"]
+    second = await client.post(
+        "/v1/chat/stream",
+        json={"message": "Use that context", "conversation_id": conversation_id},
+        headers=auth_headers("analyst"),
+    )
+    snapshot = await client.get(
+        f"/v1/conversations/{conversation_id}", headers=auth_headers("analyst")
+    )
+    denied = await client.get(
+        f"/v1/conversations/{conversation_id}", headers=auth_headers("viewer")
+    )
+
+    assert second.status_code == 200
+    assert app.state.agent_runtime.orchestrator.summaries[0] == ""
+    assert "First memory turn" in app.state.agent_runtime.orchestrator.summaries[1]
+    assert app.state.agent_runtime.orchestrator.thread_ids[0].endswith(conversation_id)
+    assert len(snapshot.json()["messages"]) == 4
+    assert snapshot.json()["persistence"] == "in_memory"
+    assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_login_and_missing_token_contract(client: httpx.AsyncClient, app: Any) -> None:
     runtime = app.state.agent_runtime
     login = await client.post(
         "/v1/auth/token",

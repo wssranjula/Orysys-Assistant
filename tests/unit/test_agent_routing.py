@@ -1,9 +1,9 @@
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field
 
+import orysys_assistant.agent.build_agent as build_agent_module
 from orysys_assistant.agent.build_agent import (
     AgentDependencies,
     build_deep_agent_graph,
@@ -16,15 +16,13 @@ from orysys_assistant.domain.errors import AuthorizationError
 from orysys_assistant.domain.models import Role
 from orysys_assistant.retrieval.runtime import build_retrieval_runtime
 from orysys_assistant.security.access_scope import AccessScopeService
-from orysys_assistant.security.authorization import AuthorizationPolicy, Capability
+from orysys_assistant.security.authorization import AuthorizationPolicy
 from orysys_assistant.security.models import TrustedRequestContext, UserIdentity
-from orysys_assistant.tools.gateway import ToolGateway, ToolSpec
+from orysys_assistant.tools.enterprise import enterprise_tool_specs
+from orysys_assistant.tools.gateway import ToolGateway
 from orysys_assistant.tools.knowledge_search import knowledge_search_spec
-
-
-class QueryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    query: str = Field(min_length=1)
+from orysys_assistant.tools.mcp_client import InMemoryEnterpriseClient
+from orysys_assistant.tools.python_analysis import python_analysis_spec
 
 
 def context(role: Role) -> TrustedRequestContext:
@@ -48,26 +46,9 @@ async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
     )
     gateway = ToolGateway(AuthorizationPolicy())
     gateway.register(knowledge_search_spec(runtime.service))
-
-    async def enterprise_handler(
-        parameters: BaseModel, request_context: TrustedRequestContext
-    ) -> dict[str, Any]:
-        query = cast(QueryInput, parameters).query
-        return {"query": query, "owner": "Payments Reliability", "authorized": True}
-
-    for name in (
-        "employee_directory.lookup",
-        "service_catalog.search",
-        "incident_records.search",
-    ):
-        gateway.register(
-            ToolSpec(
-                name=name,
-                capability=Capability.MCP_READ,
-                input_model=QueryInput,
-                handler=enterprise_handler,
-            )
-        )
+    gateway.register(python_analysis_spec(1_000))
+    for spec in enterprise_tool_specs(InMemoryEnterpriseClient(), 1, 100_000):
+        gateway.register(spec)
     return build_root_orchestrator(AgentDependencies(gateway)), runtime
 
 
@@ -86,18 +67,12 @@ async def test_root_routes_simple_and_complex_requests_with_structured_outputs()
         research_transitions.append(transition)
 
     try:
-        direct = await orchestrator.run(
-            "What is the remote working policy?", analyst, capture
-        )
+        direct = await orchestrator.run("What is the remote working policy?", analyst, capture)
         research = await orchestrator.run(
             "Investigate payment outages across the last year.", analyst, capture_research
         )
-        analysis = await orchestrator.run(
-            "Count payment incidents by root cause.", analyst
-        )
-        enterprise = await orchestrator.run(
-            "Who owns the payment service?", analyst
-        )
+        analysis = await orchestrator.run("Count payment incidents by root cause.", analyst)
+        enterprise = await orchestrator.run("Who owns the payment service?", analyst)
     finally:
         await runtime.close()
 
@@ -140,7 +115,7 @@ async def test_agent_tool_surface_denies_unapproved_tool_before_gateway() -> Non
 
     with pytest.raises(AuthorizationError):
         await research_tools.execute(
-            "employee_directory.lookup",
+            "search_employees",
             {"query": "someone"},
             context(Role.ADMINISTRATOR),
         )
@@ -159,3 +134,34 @@ def test_secure_deep_agent_harness_compiles_with_static_specialists(
 
     assert type(graph).__name__ == "CompiledStateGraph"
     assert {"model", "tools", "SkillsMiddleware.before_agent"} <= set(graph.nodes)
+
+
+def test_deep_agent_specialists_receive_only_their_approved_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        build_agent_module,
+        "create_deep_agent",
+        lambda **arguments: arguments,
+    )
+    built = build_deep_agent_graph(
+        model="openai:gpt-5-mini",
+        gateway=ToolGateway(AuthorizationPolicy()),
+        context=context(Role.ADMINISTRATOR),
+        project_root=Path(__file__).parents[2],
+    )
+    surfaces = {
+        agent["name"]: {tool.name for tool in agent["tools"]}
+        for agent in built["subagents"]
+    }
+
+    assert surfaces["research"] == {"knowledge_search"}
+    assert surfaces["analysis"] == {"knowledge_search", "structured_analysis"}
+    assert surfaces["enterprise-tools"] == {
+        "get_employee",
+        "search_employees",
+        "get_service",
+        "search_services",
+        "get_incident",
+        "search_incidents",
+    }

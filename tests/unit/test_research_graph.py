@@ -159,9 +159,7 @@ async def test_empty_coverage_recurses_once_then_returns_partial_result() -> Non
     )
 
     followups = [
-        item
-        for item in transitions
-        if item.node == "followup_planner" and item.status == "started"
+        item for item in transitions if item.node == "followup_planner" and item.status == "started"
     ]
     assert calls == 3
     assert len(followups) == 1
@@ -198,9 +196,7 @@ async def test_tool_call_budget_skips_excess_initial_tasks() -> None:
 async def test_cancellation_propagates_through_worker_fanout() -> None:
     started = asyncio.Event()
 
-    async def slow_handler(
-        parameters: BaseModel, context: TrustedRequestContext
-    ) -> dict[str, Any]:
+    async def slow_handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
         started.set()
         await asyncio.sleep(10)
         return {"evidence": []}
