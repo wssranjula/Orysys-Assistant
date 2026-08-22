@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     retrieval_final_count: int = Field(default=6, gt=0, le=20)
     retrieval_min_sparse_score: float = Field(default=0.1, ge=0, le=10)
     retrieval_retry_attempts: int = Field(default=2, ge=0, le=3)
+    retrieval_reranking_enabled: bool = True
+    retrieval_reranker_lexical_weight: float = Field(default=0.25, ge=0, le=1)
     research_max_initial_tasks: int = Field(default=4, gt=0, le=8)
     research_max_followup_tasks: int = Field(default=2, ge=0, le=4)
     research_max_recursion_depth: int = Field(default=2, ge=0, le=4)

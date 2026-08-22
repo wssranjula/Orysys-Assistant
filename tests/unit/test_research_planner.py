@@ -59,3 +59,9 @@ def test_todo_research_planner_factory_exposes_only_write_todos(
     middleware = captured["middleware"][0]
     assert isinstance(middleware, TodoListMiddleware)
     assert [tool.name for tool in middleware.tools] == ["write_todos"]
+
+
+def test_planner_prompt_is_corpus_aware_and_requires_compact_search_queries() -> None:
+    assert "incident, meeting_note, runbook" in PLANNER_SYSTEM_PROMPT
+    assert "Do not request Jira, PagerDuty, Slack" in PLANNER_SYSTEM_PROMPT
+    assert "SEARCH: <concise retrieval query" in PLANNER_SYSTEM_PROMPT

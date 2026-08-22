@@ -16,6 +16,7 @@ from orysys_assistant.retrieval.embeddings import (
 from orysys_assistant.retrieval.ingestion import IngestionPipeline
 from orysys_assistant.retrieval.models import IngestionManifest
 from orysys_assistant.retrieval.parsing import MarkdownDocumentParser
+from orysys_assistant.retrieval.reranking import HybridLexicalReranker
 from orysys_assistant.retrieval.service import RetrievalService
 from orysys_assistant.retrieval.sparse_encoding import BM25SparseEncoder
 from orysys_assistant.retrieval.vector_store import (
@@ -132,6 +133,11 @@ def _service(
         sparse_weight=settings.retrieval_sparse_weight,
         candidate_count=settings.retrieval_candidate_count,
         minimum_sparse_score=settings.retrieval_min_sparse_score,
+        reranker=(
+            HybridLexicalReranker(settings.retrieval_reranker_lexical_weight)
+            if settings.retrieval_reranking_enabled
+            else None
+        ),
     )
 
 

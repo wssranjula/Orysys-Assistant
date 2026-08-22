@@ -293,6 +293,80 @@ async def test_placeholder_conversation_and_feedback_contracts(
 
 
 @pytest.mark.asyncio
+async def test_explicit_long_term_memory_is_loaded_and_owner_isolated(
+    client: httpx.AsyncClient, app: Any
+) -> None:
+    denied = await client.put(
+        "/v1/memory/preferences/answer_style",
+        json={"key": "answer_style", "value": "Use concise bullets", "explicit": False},
+        headers=auth_headers("analyst"),
+    )
+    saved = await client.put(
+        "/v1/memory/preferences/answer_style",
+        json={"key": "answer_style", "value": "Use concise bullets", "explicit": True},
+        headers=auth_headers("analyst"),
+    )
+    analyst_list = await client.get(
+        "/v1/memory/preferences", headers=auth_headers("analyst")
+    )
+    viewer_list = await client.get(
+        "/v1/memory/preferences", headers=auth_headers("viewer")
+    )
+    chat = await client.post(
+        "/v1/chat/stream", json={"message": "Use my preferences"}, headers=auth_headers("analyst")
+    )
+
+    assert denied.status_code == 400
+    assert saved.status_code == 200
+    assert analyst_list.json()["preferences"][0]["value"] == "Use concise bullets"
+    assert viewer_list.json()["preferences"] == []
+    assert chat.status_code == 200
+    assert "Explicit preference answer_style" in app.state.agent_runtime.orchestrator.summaries[-1]
+
+
+@pytest.mark.asyncio
+async def test_admin_write_requires_approval_and_is_idempotent(
+    client: httpx.AsyncClient, app: Any
+) -> None:
+    payload = {
+        "action": "modify_incident",
+        "parameters": {
+            "incident_id": "INC-2026-004",
+            "status": "resolved",
+            "reason": "All recovery checks passed",
+        },
+        "reason": "Close recovered incident",
+    }
+    viewer = await client.post("/v1/approvals", json=payload, headers=auth_headers("viewer"))
+    pending = await client.post(
+        "/v1/approvals", json=payload, headers=auth_headers("administrator")
+    )
+
+    assert viewer.status_code == 403
+    assert pending.status_code == 202
+    assert pending.json()["status"] == "pending"
+    assert app.state.incident_write_store.updates == []
+
+    approval_id = pending.json()["approval_id"]
+    approved = await client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        json={"approved": True},
+        headers=auth_headers("administrator"),
+    )
+    duplicate = await client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        json={"approved": True},
+        headers=auth_headers("administrator"),
+    )
+
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "executed"
+    assert len(app.state.incident_write_store.updates) == 1
+    assert duplicate.status_code == 400
+    assert len(app.state.incident_write_store.updates) == 1
+
+
+@pytest.mark.asyncio
 async def test_multi_turn_memory_survives_requests_and_enforces_owner(
     client: httpx.AsyncClient, app: Any
 ) -> None:

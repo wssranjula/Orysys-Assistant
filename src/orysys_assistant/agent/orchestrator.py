@@ -52,6 +52,7 @@ class RootAgentContext:
     transition_sink: TransitionSink | None = None
     conversation_summary: str = ""
     thread_id: str | None = None
+    long_term_memory: str = ""
 
 
 class RootOrchestrator:
@@ -121,6 +122,7 @@ class RootOrchestrator:
         transition_sink: TransitionSink | None = None,
         conversation_summary: str = "",
         thread_id: str | None = None,
+        long_term_memory: str = "",
     ) -> AgentExecutionResult:
         final = await self.graph.ainvoke(
             {
@@ -135,6 +137,7 @@ class RootOrchestrator:
                 transition_sink=transition_sink,
                 conversation_summary=conversation_summary,
                 thread_id=thread_id,
+                long_term_memory=long_term_memory,
             ),
         )
         result = final["result"]
@@ -148,6 +151,7 @@ class RootOrchestrator:
         context: TrustedRequestContext,
         conversation_summary: str = "",
         thread_id: str | None = None,
+        long_term_memory: str = "",
     ) -> AsyncIterator[AgentTransition | AgentExecutionResult]:
         """Stream native LangGraph updates followed by the final typed result."""
 
@@ -157,6 +161,7 @@ class RootOrchestrator:
             # summary remains a compatibility input when no checkpointer is configured.
             conversation_summary=conversation_summary if self._checkpointer is None else "",
             thread_id=thread_id,
+            long_term_memory=long_term_memory,
         )
         async for part in self.graph.astream(
             {
@@ -199,7 +204,10 @@ class RootOrchestrator:
             ),
         )
         summary = runtime.context.conversation_summary or self._message_history(state["messages"])
-        decision = await self._router.route(state["question"], summary)
+        full_context = "\n\n".join(
+            item for item in (summary, runtime.context.long_term_memory) if item
+        )
+        decision = await self._router.route(state["question"], full_context)
         route = decision.route
         await self._emit(
             runtime.context.transition_sink,
@@ -218,7 +226,7 @@ class RootOrchestrator:
         return {
             "route": route,
             "question": self._with_conversation_context(
-                state["question"], summary
+                state["question"], full_context
             ),
         }
 

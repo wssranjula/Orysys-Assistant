@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -131,6 +131,46 @@ class ConversationSnapshot(StrictModel):
     summary: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     persistence: str = "available"
+
+
+class PreferenceWriteRequest(StrictModel):
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,49}$")
+    value: str = Field(min_length=1, max_length=500)
+    explicit: bool
+
+
+class PreferenceResponse(StrictModel):
+    key: str
+    value: str
+    updated_at: datetime
+
+
+class PreferenceListResponse(StrictModel):
+    preferences: list[PreferenceResponse] = Field(default_factory=list)
+    persistence: str
+
+
+class ApprovalCreateRequest(StrictModel):
+    action: Literal["modify_incident"]
+    parameters: dict[str, Any]
+    reason: str = Field(min_length=5, max_length=500)
+
+
+class ApprovalDecisionRequest(StrictModel):
+    approved: bool
+
+
+class ApprovalResponse(StrictModel):
+    approval_id: UUID
+    action: str
+    parameters: dict[str, Any]
+    reason: str
+    requester_id: str
+    approver_id: str | None = None
+    status: str
+    approved: bool | None = None
+    result: dict[str, Any] | None = None
+    failure_type: str | None = None
 
 
 class FeedbackRequest(StrictModel):

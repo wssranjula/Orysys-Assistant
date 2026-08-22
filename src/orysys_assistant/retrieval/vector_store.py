@@ -1,5 +1,6 @@
 """Vector store protocol, in-memory test store, and asynchronous Pinecone adapter."""
 
+import asyncio
 from typing import Any, Protocol, cast
 
 from pinecone import PineconeAsyncio
@@ -129,13 +130,16 @@ class PineconeVectorStore:
         self._dimension = dimension
         self._host = host
         self._index: Any = None
+        self._index_lock = asyncio.Lock()
 
     async def _get_index(self) -> Any:
         if self._index is None:
-            if not self._host:
-                description = await self._client.describe_index(self._index_name)
-                self._host = str(description.host)
-            self._index = self._client.IndexAsyncio(host=self._host)
+            async with self._index_lock:
+                if self._index is None:
+                    if not self._host:
+                        description = await self._client.describe_index(self._index_name)
+                        self._host = str(description.host)
+                    self._index = self._client.IndexAsyncio(host=self._host)
         return self._index
 
     async def upsert(self, namespace: str, records: list[VectorRecord]) -> int:

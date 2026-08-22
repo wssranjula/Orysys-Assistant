@@ -32,17 +32,19 @@ def request_context() -> TrustedRequestContext:
     )
 
 
-def evidence_for(query: str) -> Evidence:
+def evidence_for(query: str, document_type: str = "incident") -> Evidence:
     identifier = hashlib.sha256(query.encode()).hexdigest()[:12]
     return Evidence(
         evidence_id=f"ev_{identifier}",
         document_id=f"doc_{identifier}",
         chunk_id=f"chunk_{identifier}",
         title=f"Incident {identifier}",
-        content="The root cause was an exhausted connection pool. Service recovered safely.",
+        content=(
+            f"{query} The root cause was an exhausted connection pool. Service recovered safely."
+        ),
         metadata={
             "source_path": f"incidents/{identifier}.md",
-            "document_type": "incident",
+            "document_type": document_type,
         },
         dense_score=0.8,
         sparse_score=0.7,
@@ -87,11 +89,21 @@ def workflow_with_handler(
 @pytest.mark.asyncio
 async def test_todo_planner_creates_claim_driven_tasks_instead_of_folder_fanout() -> None:
     planned = [
-        "Trace which Project Orion controls were represented as complete before each failure.",
-        "Reconcile the initial and final root-cause evidence for PAY-1224.",
-        "Audit runtime evidence that reopened the connection-budget control after PAY-1288.",
-        "Assess whether later actions closed the recovery and consumer-canary gaps.",
+        "SEARCH: Project Orion controls reported complete | SOURCE: meeting_note | "
+        "VERIFY: Trace the original completion claims.",
+        "SEARCH: PAY-1224 root cause | SOURCE: incident | "
+        "VERIFY: Reconcile the initial and final root cause.",
+        "SEARCH: PAY-1288 connection budget | SOURCE: architecture | "
+        "VERIFY: Audit the declared control scope.",
+        "SEARCH: recovery consumer canary controls | SOURCE: runbook | "
+        "VERIFY: Assess the required recovery checks.",
     ]
+    expected_queries = {
+        "Project Orion controls reported complete",
+        "PAY-1224 root cause",
+        "PAY-1288 connection budget",
+        "recovery consumer canary controls",
+    }
 
     class FakeTodoPlanner:
         def __init__(self) -> None:
@@ -109,7 +121,13 @@ async def test_todo_planner_creates_claim_driven_tasks_instead_of_folder_fanout(
         request = cast(KnowledgeSearchInput, parameters)
         observed_queries.append(request.query)
         observed_document_types.append(request.document_type)
-        return {"evidence": [evidence_for(request.query).model_dump(mode="json")]}
+        return {
+            "evidence": [
+                evidence_for(request.query, request.document_type or "incident").model_dump(
+                    mode="json"
+                )
+            ]
+        }
 
     workflow = workflow_with_handler(handler, limits(), planner)
     transitions = []
@@ -124,8 +142,13 @@ async def test_todo_planner_creates_claim_driven_tasks_instead_of_folder_fanout(
     )
 
     assert len(planner.calls) == 1
-    assert set(observed_queries) == set(planned)
-    assert observed_document_types == [None] * 4
+    assert set(observed_queries) == expected_queries
+    assert set(observed_document_types) == {
+        "meeting_note",
+        "incident",
+        "architecture",
+        "runbook",
+    }
     assert execution.result.partial is False
     planner_event = next(
         item for item in transitions if item.node == "planner" and item.status == "completed"
@@ -147,7 +170,12 @@ async def test_compiled_graph_bounds_concurrency_and_isolates_worker_failure() -
             await asyncio.sleep(0.02)
             if "meeting note" in query:
                 raise RuntimeError("simulated retrieval failure")
-            return {"evidence": [evidence_for(query).model_dump(mode="json")]}
+            request = cast(KnowledgeSearchInput, parameters)
+            return {
+                "evidence": [
+                    evidence_for(query, request.document_type or "incident").model_dump(mode="json")
+                ]
+            }
         finally:
             active -= 1
 
@@ -174,11 +202,52 @@ async def test_compiled_graph_bounds_concurrency_and_isolates_worker_failure() -
         "finalize",
     } <= set(workflow.graph.nodes)
     assert maximum_active == 2
-    assert execution.result.partial is False
+    assert execution.result.partial is True
     assert len(execution.evidence) >= 3
     assert len(set(execution.result.evidence_ids)) >= 3
     assert any("RuntimeError" in warning for warning in execution.result.warnings)
     assert any(item.node.startswith("worker:") for item in transitions)
+
+
+@pytest.mark.asyncio
+async def test_coverage_rejects_wrong_source_type_and_runs_gap_followup() -> None:
+    class FakeTodoPlanner:
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            return [
+                "SEARCH: Project Orion completion claims | SOURCE: meeting_note | "
+                "VERIFY: Establish which controls were reported complete."
+            ]
+
+    calls = 0
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "evidence": [evidence_for(f"irrelevant-{calls}", "incident").model_dump(mode="json")]
+        }
+
+    workflow = workflow_with_handler(
+        handler,
+        limits(
+            max_initial_tasks=1,
+            max_followup_tasks=1,
+            max_recursion_depth=1,
+            max_total_tool_calls=2,
+        ),
+        FakeTodoPlanner(),
+    )
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    execution = await workflow.run("Investigate Project Orion.", request_context(), capture)
+
+    assert calls == 2
+    assert execution.result.partial is True
+    assert execution.result.unresolved_questions
+    assert any(item.node == "followup_planner" for item in transitions)
 
 
 @pytest.mark.asyncio

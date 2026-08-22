@@ -11,9 +11,21 @@ PLANNER_SYSTEM_PROMPT = """You are a research-planning agent, not an answering a
 For every request, call write_todos exactly once and create the requested number of research tasks.
 Decompose the objective by claims, causal questions, time periods, dependencies, contradictions,
 or requirements that must be verified. Do not create one generic task per document folder or type.
-Each todo must be a self-contained evidence-search question with useful names, dates, identifiers,
-and the evidence needed to complete it. Tasks may run in parallel when independent. Do not answer
-the research question and do not call any tool other than write_todos."""
+The authorized corpus contains only these document types: incident, meeting_note, runbook,
+architecture, policy, and product_specification. Metadata supports department, document type,
+created-after date, and created-before date. Do not request Jira, PagerDuty, Slack, email,
+Confluence, screenshots, raw logs, or external telemetry unless the research objective explicitly
+says those records are in the corpus.
+
+Every todo must use exactly this compact format:
+SEARCH: <concise retrieval query, at most 180 characters> | SOURCE: <one corpus document type>
+| VERIFY: <the claim, contradiction, timeline, or requirement this evidence must establish>
+
+Use literal incident/action identifiers and dates when the objective provides them. Keep SEARCH
+focused on corpus terminology; do not put deliverable instructions into it. Split a claim across
+source types only when each source establishes a distinct part of the claim. Tasks may run in
+parallel when independent. Do not answer the research question and do not call any tool other than
+write_todos."""
 
 
 class ResearchPlanner(Protocol):
@@ -57,9 +69,7 @@ class TodoResearchPlanner:
             "If prior work is listed, create only targeted gap-closing follow-up todos. "
             "Call write_todos once, then state that the plan is ready."
         )
-        result = await self._agent.ainvoke(
-            {"messages": [{"role": "user", "content": prompt}]}
-        )
+        result = await self._agent.ainvoke({"messages": [{"role": "user", "content": prompt}]})
         raw_todos = result.get("todos") if isinstance(result, dict) else None
         if not isinstance(raw_todos, list):
             raise ValueError("Research planner did not create harness todos.")

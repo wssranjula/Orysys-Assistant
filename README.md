@@ -31,6 +31,7 @@ execution limits, citation validation, and rate limiting are deterministic platf
 - Dense + BM25 hybrid retrieval with metadata filtering and evidence attribution
 - Knowledge search, structured analysis, and approved read-only MCP tools
 - Session memory, prompt-injection controls, output validation, graceful degradation
+- Reranking, explicit long-term preferences, failure containment, and admin approvals
 - LangSmith traces and structured logs without hidden chain-of-thought
 
 ### Explicitly out of scope
@@ -295,6 +296,10 @@ enterprise reads to exactly three specialists. The simplified Recursive Language
 compiled LangGraph that plans targeted tasks, fans out bounded workers, reduces evidence, checks
 coverage, and permits limited follow-up recursion. See [docs/agents.md](docs/agents.md) and
 [docs/research-graph.md](docs/research-graph.md).
+
+Phase 10 adds an authorization-preserving reranker, an explicit user preference store, correlated
+worker-failure circuit breaking, and a human approval graph for the dummy incident write. See
+[Phase 10 bonus features](docs/phase-10-bonus-features.md).
 
 ## Retrieval, security, failure handling, and memory
 

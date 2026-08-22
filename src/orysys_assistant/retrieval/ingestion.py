@@ -135,6 +135,9 @@ class IngestionPipeline:
         sparse_encoder: BM25SparseEncoder,
     ) -> VectorRecord:
         metadata = chunk.metadata.model_dump(mode="json")
+        # Pinecone supports range operators only for numeric metadata. Keep the ISO
+        # value for display/citations and use the ordinal exclusively for filtering.
+        metadata["created_date_ordinal"] = chunk.metadata.created_date.toordinal()
         metadata["page_number"] = (
             chunk.metadata.page_number if chunk.metadata.page_number is not None else -1
         )

@@ -6,9 +6,18 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from orysys_assistant.agent.approval_graph import ApprovalService
 from orysys_assistant.api.error_handlers import register_error_handlers
 from orysys_assistant.api.middleware import RequestContextMiddleware
-from orysys_assistant.api.routes import auth, chat, conversations, feedback, health
+from orysys_assistant.api.routes import (
+    approvals,
+    auth,
+    chat,
+    conversations,
+    feedback,
+    health,
+    preferences,
+)
 from orysys_assistant.config import Settings, get_settings
 from orysys_assistant.guardrails.input import InputGuard
 from orysys_assistant.guardrails.output import OutputValidator
@@ -19,6 +28,7 @@ from orysys_assistant.security.access_scope import AccessScopeService
 from orysys_assistant.security.authentication import AuthenticationService
 from orysys_assistant.security.authorization import AuthorizationPolicy
 from orysys_assistant.security.rate_limit import TokenBucketRateLimiter, build_rate_limiter
+from orysys_assistant.tools.admin import DummyIncidentWriteStore, modify_incident_spec
 from orysys_assistant.tools.gateway import ToolGateway
 
 if TYPE_CHECKING:
@@ -40,6 +50,9 @@ def create_app(
     authorization_policy = AuthorizationPolicy()
     resolved_rate_limiter = rate_limiter or build_rate_limiter(resolved_settings)
     tool_gateway = ToolGateway(authorization_policy)
+    incident_write_store = DummyIncidentWriteStore()
+    tool_gateway.register(modify_incident_spec(incident_write_store))
+    approval_service = ApprovalService(tool_gateway)
     memory_runtime = MemoryRuntime(resolved_settings)
     agent_runtime = AgentRuntimeManager(
         resolved_settings,
@@ -76,6 +89,8 @@ def create_app(
     app.state.tool_gateway = tool_gateway
     app.state.agent_runtime = agent_runtime
     app.state.memory_runtime = memory_runtime
+    app.state.approval_service = approval_service
+    app.state.incident_write_store = incident_write_store
     app.state.input_guard = InputGuard()
     app.state.output_validator = OutputValidator()
     app.add_middleware(RequestContextMiddleware)
@@ -85,6 +100,8 @@ def create_app(
     app.include_router(chat.router)
     app.include_router(conversations.router)
     app.include_router(feedback.router)
+    app.include_router(preferences.router)
+    app.include_router(approvals.router)
     return app
 
 

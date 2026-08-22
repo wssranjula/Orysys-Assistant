@@ -26,6 +26,8 @@ retrieval:
   sparse_weight: 0.35
   timeout_seconds: 15
   min_sparse_score: 0.1
+  reranking_enabled: true
+  reranker_lexical_weight: 0.25
 
 research:
   max_initial_tasks: 4

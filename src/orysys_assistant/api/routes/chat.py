@@ -100,6 +100,13 @@ async def stream_chat_events(
     request_id: UUID = request.state.request_id
     conversation_id = conversation.conversation_id
     started = perf_counter()
+    preferences = await repository.list_preferences(context.identity.user_id)
+    preference_context = "\n".join(
+        f"Explicit preference {item.key}: {item.value}" for item in preferences
+    )
+    conversation_context = "\n\n".join(
+        item for item in (conversation.summary, preference_context) if item
+    )
     structlog.contextvars.bind_contextvars(
         conversation_id=str(conversation_id),
         user_id=context.identity.user_id,
@@ -162,7 +169,10 @@ async def stream_chat_events(
                 status=ActivityStatus.COMPLETED,
                 message=f"Loaded {len(conversation.messages)} recent conversation messages.",
                 node="conversation_memory",
-                metadata={"evidence_count": len(conversation.evidence_ids)},
+                metadata={
+                    "evidence_count": len(conversation.evidence_ids),
+                    "long_term_preference_count": len(preferences),
+                },
             ),
         )
         langsmith_client = (
@@ -190,6 +200,7 @@ async def stream_chat_events(
                         context,
                         conversation.summary,
                         f"{context.identity.user_id}:{conversation_id}",
+                        preference_context,
                     ):
                         await _ensure_connected(request)
                         if isinstance(update, AgentTransition):
@@ -218,7 +229,7 @@ async def stream_chat_events(
                         payload.message,
                         context,
                         transitions.put,
-                        conversation.summary,
+                        conversation_context,
                         f"{context.identity.user_id}:{conversation_id}",
                     )
                 )
