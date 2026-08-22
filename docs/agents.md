@@ -27,8 +27,9 @@ the frozen API response and citation contracts.
 The Phase 4 analysis specialist performs a fixed count over authorized evidence in application code.
 The separately gateway-enforced controlled analysis tool is introduced in Phase 6.
 
-The deterministic research specialist performs one bounded retrieval in this phase. The recursive,
-budgeted LangGraph research workflow is intentionally deferred to Phase 5.
+The Research specialist owns the compiled, recursive, budgeted Phase 5 LangGraph described in
+[research-graph.md](research-graph.md). The root still delegates through the same small static agent
+surface; recursion occurs only inside that code-controlled specialist workflow.
 
 ## Deep Agents harness
 

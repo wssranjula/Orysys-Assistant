@@ -5,9 +5,8 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 4 complete — authenticated hybrid retrieval plus controlled root-agent
-> routing and three tool-scoped specialists.** Complex recursive research remains bounded for
-> Phase 5.
+> Current status: **Phase 5 complete — authenticated hybrid retrieval, controlled agent routing,
+> and a bounded recursive LangGraph research workflow.**
 
 ## POC scope
 
@@ -177,8 +176,21 @@ trusted scope, schemas, timeouts, and audit logging.
 
 A provider-backed Deep Agents graph factory is also included with default filesystem and shell
 tools excluded, the general-purpose subagent disabled, three declarative specialists, and the four
-skills under `skills/`. Phase 4 keeps API routing deterministic; Phase 5 will add the compiled,
-bounded recursive research graph. See [docs/agents.md](docs/agents.md).
+skills under `skills/`. See [docs/agents.md](docs/agents.md).
+
+### Phase 5 bounded research workflow
+
+Complex research requests now enter a compiled LangGraph subgraph. It normalizes trusted scope,
+creates up to four independent tasks, runs retrieval workers concurrently through the Tool Gateway,
+deduplicates evidence and claims, checks coverage, and performs at most two bounded follow-up rounds.
+Code-enforced limits cover parallel workers, recursion depth, total tool calls, evidence per worker,
+worker deadlines, and the overall deadline.
+
+Worker failures are converted to structured warnings while other workers continue. Exhausted budgets
+produce a `partial` response with unresolved coverage questions instead of an unbounded retry or a
+fabricated complete answer. Research-node transitions are streamed to the existing UI activity feed,
+and graph nodes plus workers appear in LangSmith. See
+[docs/research-graph.md](docs/research-graph.md).
 
 ## Delivery roadmap
 
@@ -187,7 +199,7 @@ bounded recursive research graph. See [docs/agents.md](docs/agents.md).
 3. Phase 2 — complete: authentication, authorization, tool gateway, and Redis rate limiting
 4. Phase 3 — complete: sample corpus, ingestion, and hybrid Pinecone retrieval
 5. Phase 4 — complete: controlled root agent, three specialists, skills, and delegation traces
-6. Phase 5 — bounded recursive LangGraph research workflow
+6. Phase 5 — complete: bounded concurrent research graph with follow-up recursion
 7. Phase 6+ — memory, MCP/analysis tools, hardening, observability, and deployment
 
 The original assessment is preserved in [assignment.md](assignment.md); the working plan is
