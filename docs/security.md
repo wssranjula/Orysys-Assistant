@@ -1,4 +1,4 @@
-# Security Boundary (Phase 2)
+# Security Boundary
 
 ## Identity and credentials
 
@@ -43,6 +43,11 @@ and the policy boundary is LangSmith-traceable when tracing is enabled.
 | MCP read | no | yes | yes |
 | administrative tools | no | no | yes |
 | restricted documents | no | no | yes |
+
+The approval endpoints require the `administrative tools` capability. A pending synthetic incident
+change may be approved or rejected only by an administrator whose user ID differs from the
+requester. Approval records persist in PostgreSQL in the Compose profile; the write handler itself
+remains a synthetic POC implementation.
 
 ## Tool gateway
 

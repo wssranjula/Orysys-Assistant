@@ -20,7 +20,7 @@ docker compose exec api python -m scripts.ingest_sample_documents --backend memo
 uv run python scripts/smoke_test.py
 ```
 
-On macOS/Linux, use `cp .env.example .env`. Replace the three bearer-token placeholders and the
+On macOS/Linux, use `cp .env.example .env`. Replace the four bearer-token placeholders and the
 database password in any shared environment. The memory ingestion command verifies the full
 parsing/chunking/embedding pipeline; each API process also builds its deterministic in-memory index
 at startup.
@@ -63,9 +63,10 @@ remain external managed services; they are not emulated by Compose.
 | `redis` | ephemeral token buckets | backend network only |
 
 Application containers use UID 10001, `no-new-privileges`, read-only root filesystems, small tmpfs
-mounts, and explicit health checks. PostgreSQL stores durable application state; the second named
-volume stores only the reproducible ingestion manifest. Redis persistence is deliberately disabled
-because token buckets can expire and rebuild.
+mounts, and explicit health checks. PostgreSQL stores conversations, LangGraph checkpoints,
+explicit preferences, and approval records; the second named volume stores only the reproducible
+ingestion manifest. Redis persistence is deliberately disabled because token buckets can expire and
+rebuild.
 
 ## Operations
 

@@ -1,4 +1,4 @@
-# Hybrid Evidence Layer (Phase 3)
+# Hybrid Evidence Layer
 
 ## Corpus
 
@@ -61,9 +61,10 @@ filters for department, document type, and date. User filters are placed in an `
 they can never replace or broaden the trusted filter.
 
 Dense and sparse candidate queries run concurrently. Positive scores are normalized per channel,
-combined with default weights 0.65 dense and 0.35 sparse, deduplicated by real chunk ID, and
-limited to the requested evidence count. Evidence includes content, source attribution, raw
-component scores, final score, and a deterministic evidence ID.
+combined with default weights 0.65 dense and 0.35 sparse, deduplicated by real chunk ID, optionally
+reranked with a lexical blend when `RETRIEVAL_RERANKING_ENABLED=true`, and limited to the requested
+evidence count. Evidence includes content, source attribution, raw component scores, final score,
+and a deterministic evidence ID.
 
 The `knowledge_search` tool is registered through the central gateway contract. Its input schema
 does not contain identity, role, namespace, organization, or access-level fields; attempts to add

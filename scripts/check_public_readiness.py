@@ -16,6 +16,7 @@ REQUIRED_PATHS = (
     "docs/assumptions-and-tradeoffs.md",
     "docs/demo-script.md",
     "docs/deployment.md",
+    "docs/README.md",
     "docs/observability-and-evaluation.md",
     "data/golden_evaluation_report.json",
     "data/hard_research_questions.json",

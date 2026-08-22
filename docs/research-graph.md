@@ -1,4 +1,4 @@
-# Bounded Research Graph (Phase 5)
+# Bounded Research Graph
 
 The Research specialist executes complex, multi-document questions through one reusable compiled
 LangGraph. It does not create autonomous agents or expose new tools. Every retrieval worker uses the

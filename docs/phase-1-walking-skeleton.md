@@ -1,4 +1,9 @@
-# Phase 1 Walking Skeleton
+# Phase 1 Walking Skeleton (Historical)
+
+> This document records the initial milestone and is not the current runtime description. The mock
+> agent and placeholder persistence described below were removed in later phases. For the current
+> implementation, see [architecture.md](architecture.md), [contracts.md](contracts.md), and
+> [agents.md](agents.md).
 
 ## Implemented request path
 
@@ -6,14 +11,14 @@
 Streamlit chat
   -> POST /v1/chat/stream
   -> request correlation middleware
-  -> temporary traceable mock agent
+  -> deterministic or model-backed root agent
   -> activity + answer_delta SSE events
   -> validated terminal response
   -> Streamlit answer and activity panels
 ```
 
-The mock agent deliberately performs no retrieval or tool call. Its warning in every final
-response makes that limitation visible rather than implying grounded behavior prematurely.
+At Phase 1 this path used a temporary mock agent with no retrieval or tool calls. The current path
+uses authorized retrieval, scoped tools, output validation, and persisted conversation state.
 
 ## SSE lifecycle
 
@@ -29,14 +34,12 @@ the browser closes the connection.
 
 ## Observability
 
-The API logs JSON records with bound request/conversation context, status, duration, and safe
-error type fields. It never logs authorization headers or request bodies. With LangSmith enabled,
-the mock agent call creates a `phase1-mock-agent` trace tagged `phase-1` and
-`walking-skeleton`, with request and conversation IDs in trace metadata.
+The current API logs JSON records with bound request/conversation context, status, duration, and
+safe error type fields. It never logs authorization headers or request bodies. LangSmith tracing is
+optional and traces the current router, tools, retrieval, and graph nodes rather than a mock agent.
 
 ## Deferred by design
 
-Authentication, real persistence, retrieval, agents, tools, and external dependency readiness
-are later-phase work. The conversation and feedback endpoints return typed placeholders that
-state persistence is unavailable; they do not pretend data was stored.
-
+Authentication, durable conversation state, retrieval, scoped tools, approvals, and readiness were
+delivered in later phases. Feedback remains the only intentionally acknowledged-but-unpersisted API
+surface.

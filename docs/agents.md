@@ -1,4 +1,4 @@
-# Agent Orchestration (Phase 4)
+# Agent Orchestration
 
 The production runtime is one compiled LangGraph with a model-backed supervisor, five bounded
 branches, and a shared synthesis node. Every supervisor decision is schema-validated and visible in
@@ -24,9 +24,11 @@ uses the current request and bounded conversation context to select `direct_know
 `analysis`, `enterprise`, or `out_of_scope`. The response schema contains only that enum and uses
 LangChain's retry-capable tool strategy, avoiding unnecessary model-generated routing metadata.
 The graph maps the enum to code-defined conditional edges and generates a safe plan summary for the
-selected route; the model cannot create a route, tool, permission, or execution budget. There is
-deliberately no keyword-routing fallback. The router emits an `agent_started` event and a
-`routing_completed` event. Delegated routes additionally
+selected route; the model cannot create a route, tool, permission, or execution budget. When no
+model credential is configured, the local profile uses `DeterministicIntentRouter`, a conservative
+keyword-based classifier documented in ADR 008. Hosted deployments use `LLMIntentRouter` instead.
+The router emits an `agent_started` event and a `routing_completed` event. Delegated routes
+additionally
 emit `subagent_started` and `subagent_completed`; direct retrieval emits retrieval start/completion.
 All specialist results validate through strict Pydantic contracts before the root converts them to
 the frozen API response and citation contracts.

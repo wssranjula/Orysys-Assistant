@@ -1,8 +1,8 @@
 # Guardrails, Citation Validation, and Graceful Degradation
 
-Phase 7 adds deterministic safety controls around the agent runtime. Prompts still help agents
-behave well, but identity, scope, tool permissions, evidence trust, deadlines, and response
-validation remain code-enforced boundaries.
+Deterministic safety controls surround the agent runtime. Prompts still help agents behave well,
+but identity, scope, tool permissions, evidence trust, deadlines, and response validation remain
+code-enforced boundaries.
 
 ## Request and tool boundary
 
