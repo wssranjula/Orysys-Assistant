@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "orysys-assistant"
+version = "0.1.0"
+description = "Evidence-grounded enterprise AI assistant POC for Commercial Bank"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "asyncpg>=0.30,<1",
+  "deepagents>=0.7,<1",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "langchain>=1.3,<2",
+  "langchain-openai>=1.1,<2",
+  "langgraph>=1.0,<2",
+  "langsmith>=0.4,<1",
+  "mcp>=1.12,<2",
+  "pinecone>=7,<8",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.10,<3",
+  "rank-bm25>=0.2.2,<1",
+  "redis>=6,<7",
+  "sqlalchemy>=2.0,<3",
+  "sse-starlette>=3,<4",
+  "streamlit>=1.47,<2",
+  "structlog>=25,<26",
+  "tenacity>=9,<10",
+  "tiktoken>=0.9,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17,<2",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+  "pytest-cov>=6.2,<7",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orysys_assistant"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["orysys_assistant"]
