@@ -77,16 +77,20 @@ async def test_root_routes_simple_and_complex_requests_with_structured_outputs()
     orchestrator, runtime = await build_orchestrator(project_root)
     analyst = context(Role.ANALYST)
     transitions = []
+    research_transitions = []
 
     async def capture(transition: Any) -> None:
         transitions.append(transition)
+
+    async def capture_research(transition: Any) -> None:
+        research_transitions.append(transition)
 
     try:
         direct = await orchestrator.run(
             "What is the remote working policy?", analyst, capture
         )
         research = await orchestrator.run(
-            "Investigate payment outages across the last year.", analyst
+            "Investigate payment outages across the last year.", analyst, capture_research
         )
         analysis = await orchestrator.run(
             "Count payment incidents by root cause.", analyst
@@ -101,6 +105,12 @@ async def test_root_routes_simple_and_complex_requests_with_structured_outputs()
     assert direct.citations and direct.evidence_ids
     assert research.route is AgentRoute.RESEARCH
     assert research.evidence_ids
+    assert {item.node for item in research_transitions} >= {
+        "planner",
+        "workers",
+        "reducer",
+        "coverage_check",
+    }
     assert analysis.route is AgentRoute.ANALYSIS
     assert "Processed" in analysis.answer
     assert enterprise.route is AgentRoute.ENTERPRISE
