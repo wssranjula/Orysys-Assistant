@@ -44,6 +44,8 @@ class ActivityEventType(StrEnum):
     ROUTING_COMPLETED = "routing_completed"
     SUBAGENT_STARTED = "subagent_started"
     SUBAGENT_COMPLETED = "subagent_completed"
+    RESEARCH_NODE_STARTED = "research_node_started"
+    RESEARCH_NODE_COMPLETED = "research_node_completed"
     RETRIEVAL_STARTED = "retrieval_started"
     RETRIEVAL_COMPLETED = "retrieval_completed"
     TOOL_STARTED = "tool_started"

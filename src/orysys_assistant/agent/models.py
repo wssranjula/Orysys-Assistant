@@ -5,8 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from orysys_assistant.domain.models import Citation
-from orysys_assistant.retrieval.models import Evidence
+from orysys_assistant.domain.models import Citation, ResponseStatus
+from orysys_assistant.retrieval.models import Evidence, SearchFilters
 
 
 class AgentModel(BaseModel):
@@ -44,6 +44,27 @@ class ResearchResult(AgentModel):
     partial: bool = False
 
 
+class ResearchTask(AgentModel):
+    task_id: str
+    question: str
+    filters: SearchFilters = Field(default_factory=SearchFilters)
+    expected_output: str
+
+
+class ResearchPlan(AgentModel):
+    objective: str
+    tasks: list[ResearchTask]
+    aggregation_method: str
+
+
+class ResearchTaskResult(AgentModel):
+    task_id: str
+    status: str
+    findings: list[Finding] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    warning: str | None = None
+
+
 class AnalysisResult(AgentModel):
     operation: str
     rows_processed: int
@@ -75,7 +96,7 @@ class EnterpriseExecution(AgentModel):
 class AgentExecutionResult(AgentModel):
     route: AgentRoute
     answer: str
+    status: ResponseStatus = ResponseStatus.COMPLETE
     citations: list[Citation] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
-

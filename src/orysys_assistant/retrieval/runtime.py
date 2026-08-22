@@ -157,7 +157,7 @@ class AgentRuntimeManager:
                     )
                     self._gateway.register(knowledge_search_spec(self._runtime.service))
                     self._orchestrator = build_root_orchestrator(
-                        AgentDependencies(self._gateway)
+                        AgentDependencies(self._gateway, self._settings)
                     )
         return self._orchestrator
 

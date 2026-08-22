@@ -20,7 +20,7 @@ from orysys_assistant.agent.subagents import (
     _first_sentence,
 )
 from orysys_assistant.agent.toolbox import ScopedToolbox
-from orysys_assistant.domain.models import Citation
+from orysys_assistant.domain.models import Citation, ResponseStatus
 from orysys_assistant.retrieval.models import Evidence
 from orysys_assistant.security.models import TrustedRequestContext
 
@@ -114,7 +114,7 @@ class RootOrchestrator:
         sink: TransitionSink | None,
     ) -> AgentExecutionResult:
         await self._subagent_transition(sink, self._research.name, "started")
-        execution = await self._research.run(question, context)
+        execution = await self._research.run(question, context, sink)
         await self._subagent_transition(sink, self._research.name, "completed")
         return self._research_response(execution)
 
@@ -195,6 +195,9 @@ class RootOrchestrator:
         return AgentExecutionResult(
             route=AgentRoute.RESEARCH,
             answer="\n".join(lines),
+            status=(
+                ResponseStatus.PARTIAL if execution.result.partial else ResponseStatus.COMPLETE
+            ),
             citations=cls._citations(execution.evidence),
             warnings=execution.result.warnings,
             evidence_ids=execution.result.evidence_ids,

@@ -16,6 +16,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import StructuredTool
 
 from orysys_assistant.agent.orchestrator import RootOrchestrator
+from orysys_assistant.agent.research_graph import ResearchLimits
 from orysys_assistant.agent.router import IntentRouter
 from orysys_assistant.agent.subagents import (
     AnalysisSubagent,
@@ -23,6 +24,7 @@ from orysys_assistant.agent.subagents import (
     ResearchSubagent,
 )
 from orysys_assistant.agent.toolbox import ScopedToolbox
+from orysys_assistant.config import Settings
 from orysys_assistant.security.models import TrustedRequestContext
 from orysys_assistant.tools.gateway import ToolGateway
 
@@ -35,12 +37,17 @@ _profile_registered = False
 @dataclass(frozen=True, slots=True)
 class AgentDependencies:
     gateway: ToolGateway
+    settings: Settings | None = None
 
 
 def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator:
     gateway = dependencies.gateway
+    settings = dependencies.settings or Settings.model_construct()
     direct = ScopedToolbox(gateway, frozenset({"knowledge_search"}))
-    research = ResearchSubagent(ScopedToolbox(gateway, frozenset({"knowledge_search"})))
+    research = ResearchSubagent(
+        ScopedToolbox(gateway, frozenset({"knowledge_search"})),
+        ResearchLimits.from_settings(settings),
+    )
     analysis = AnalysisSubagent(ScopedToolbox(gateway, frozenset({"knowledge_search"})))
     enterprise = EnterpriseToolSubagent(
         ScopedToolbox(

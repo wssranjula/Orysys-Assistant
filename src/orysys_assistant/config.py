@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     retrieval_sparse_weight: float = Field(default=0.35, ge=0, le=1)
     retrieval_candidate_count: int = Field(default=20, gt=0, le=100)
     retrieval_final_count: int = Field(default=6, gt=0, le=20)
+    research_max_initial_tasks: int = Field(default=4, gt=0, le=8)
+    research_max_followup_tasks: int = Field(default=2, ge=0, le=4)
+    research_max_recursion_depth: int = Field(default=2, ge=0, le=4)
+    research_max_parallel_workers: int = Field(default=3, gt=0, le=8)
+    research_max_total_tool_calls: int = Field(default=20, gt=0, le=50)
+    research_max_chunks_per_worker: int = Field(default=6, gt=0, le=12)
+    research_worker_timeout_seconds: float = Field(default=25, gt=0, le=60)
+    research_overall_timeout_seconds: float = Field(default=90, gt=0, le=180)
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = Field(default=1536, gt=0)
     redis_url: str = "redis://localhost:6379/0"

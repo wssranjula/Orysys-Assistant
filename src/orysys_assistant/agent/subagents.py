@@ -10,10 +10,9 @@ from orysys_assistant.agent.models import (
     AnalysisResult,
     EnterpriseExecution,
     EnterpriseToolResult,
-    Finding,
     ResearchExecution,
-    ResearchResult,
 )
+from orysys_assistant.agent.research_graph import ResearchLimits, ResearchWorkflow, TransitionSink
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.domain.errors import InvalidRequestError
 from orysys_assistant.retrieval.models import Evidence
@@ -29,39 +28,21 @@ def _evidence_from_tool(result: Any) -> list[Evidence]:
 class ResearchSubagent:
     name = "research_subagent"
 
-    def __init__(self, toolbox: ScopedToolbox) -> None:
-        self._toolbox = toolbox
+    def __init__(self, toolbox: ScopedToolbox, limits: ResearchLimits) -> None:
+        self.workflow = ResearchWorkflow(toolbox, limits)
 
     @traceable(
         name="delegate-research-subagent",
         run_type="chain",
         metadata={"agent": "research_subagent", "delegated": True},
     )
-    async def run(self, question: str, context: TrustedRequestContext) -> ResearchExecution:
-        evidence = _evidence_from_tool(
-            await self._toolbox.execute(
-                "knowledge_search",
-                {"query": question, "top_k": 10},
-                context,
-            )
-        )
-        findings = [
-            Finding(
-                claim=f"{item.title}: {_first_sentence(item.content)}",
-                evidence_ids=[item.evidence_id],
-            )
-            for item in evidence
-        ]
-        return ResearchExecution(
-            result=ResearchResult(
-                summary=f"Reviewed {len(evidence)} authorized evidence records.",
-                findings=findings,
-                evidence_ids=[item.evidence_id for item in evidence],
-                unresolved_questions=[] if evidence else ["No relevant authorized evidence found."],
-                partial=not evidence,
-            ),
-            evidence=evidence,
-        )
+    async def run(
+        self,
+        question: str,
+        context: TrustedRequestContext,
+        transition_sink: TransitionSink | None = None,
+    ) -> ResearchExecution:
+        return await self.workflow.run(question, context, transition_sink)
 
 
 class AnalysisSubagent:

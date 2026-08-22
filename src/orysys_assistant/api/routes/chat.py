@@ -210,7 +210,7 @@ async def stream_chat_events(
             FinalResponse(
                 request_id=request_id,
                 conversation_id=conversation_id,
-                status=ResponseStatus.COMPLETE,
+                status=result.status,
                 answer=result.answer,
                 citations=result.citations,
                 warnings=result.warnings,
