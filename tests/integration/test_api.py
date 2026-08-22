@@ -32,11 +32,7 @@ class ScenarioRouter:
 
     async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
         route = self.routes[question]
-        return RouteDecision(
-            route=route,
-            confidence=1,
-            summary=f"Fixture supervisor selected {route.value}.",
-        )
+        return RouteDecision(route=route)
 
 
 class FakeOrchestrator:

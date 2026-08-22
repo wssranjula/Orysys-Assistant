@@ -2,7 +2,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain.agents.structured_output import ToolStrategy
 
+import orysys_assistant.agent.build_agent as agent_factory
 from orysys_assistant.agent.build_agent import (
     AgentDependencies,
     build_root_orchestrator,
@@ -57,11 +59,15 @@ class TestRouter:
 
     async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
         route = self.routes.get(question, AgentRoute.DIRECT_KNOWLEDGE)
-        return RouteDecision(
-            route=route,
-            confidence=1,
-            summary=f"Test supervisor selected {route.value}.",
-        )
+        return RouteDecision(route=route)
+
+
+def test_route_decision_contains_only_the_branch_enum() -> None:
+    schema = RouteDecision.model_json_schema()
+
+    assert set(schema["properties"]) == {"route"}
+
+
 def test_conversation_context_fits_the_knowledge_search_contract() -> None:
     question = "Were there any incidents related to attachments?"
     summary = "older context " * 1_000 + "most recent attachment discussion"
@@ -92,8 +98,6 @@ async def test_llm_router_validates_the_supervisor_structured_decision() -> None
             return {
                 "structured_response": {
                     "route": "research",
-                    "confidence": 0.87,
-                    "summary": "Compare multiple sources before answering.",
                 }
             }
 
@@ -104,7 +108,6 @@ async def test_llm_router_validates_the_supervisor_structured_decision() -> None
     )
 
     assert decision.route is AgentRoute.RESEARCH
-    assert decision.confidence == 0.87
     prompt = agent.request["messages"][0]["content"]
     assert "historical incidents" in prompt
     assert "two payment services" in prompt
@@ -121,6 +124,36 @@ def test_production_factory_has_no_deterministic_router_fallback() -> None:
         build_root_orchestrator(
             AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings)
         )
+
+
+def test_production_supervisor_uses_retryable_route_only_tool_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_create_agent(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(agent_factory, "ChatOpenAI", lambda **_: object())
+    monkeypatch.setattr(agent_factory, "create_agent", fake_create_agent)
+
+    build_root_orchestrator(
+        AgentDependencies(
+            ToolGateway(AuthorizationPolicy()),
+            settings=Settings(
+                openai_api_key="test-key",
+                agent_synthesis_enabled=False,
+                _env_file=None,
+            ),
+        )
+    )
+
+    strategy = captured["response_format"]
+    assert isinstance(strategy, ToolStrategy)
+    assert strategy.schema is RouteDecision
+    assert set(strategy.schema_specs[0].json_schema["properties"]) == {"route"}
+    assert isinstance(strategy.handle_errors, str)
 
 
 @pytest.mark.asyncio

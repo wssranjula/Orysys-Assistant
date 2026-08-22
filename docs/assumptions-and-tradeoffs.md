@@ -14,12 +14,12 @@
 
 ### Model routing with deterministic enforcement
 
-The API uses a provider-backed LangChain supervisor with structured output for semantic routing.
-The supervisor may choose only one declared route; LangGraph edges, tool surfaces, identity,
-authorization, scope, budgets, citation resolution, and validation remain deterministic code. A
-missing or failed routing model fails the request rather than falling back to keyword matching.
-Tests inject router doubles so offline verification remains reproducible without changing the
-production routing policy.
+The API uses a model-backed LangChain supervisor with retry-capable tool-structured output for
+semantic routing. The supervisor may choose only one declared route; LangGraph edges, tool surfaces,
+identity, authorization, scope, budgets, citation resolution, and validation remain deterministic
+code. A missing or failed routing model fails the request rather than falling back to keyword
+matching. Tests inject router doubles so offline verification remains reproducible without changing
+the production routing policy.
 
 ### Simplified RLM
 

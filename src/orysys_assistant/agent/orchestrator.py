@@ -211,8 +211,7 @@ class RootOrchestrator:
                 message=f"Selected {route.value} route.",
                 metadata={
                     "route": route.value,
-                    "plan_summary": decision.summary,
-                    "routing_confidence": decision.confidence,
+                    "plan_summary": self._plan_summary(route),
                 },
             ),
         )
@@ -356,6 +355,16 @@ class RootOrchestrator:
             if isinstance(message.content, str)
         )
         return transcript[-8_000:]
+
+    @staticmethod
+    def _plan_summary(route: AgentRoute) -> str:
+        return {
+            AgentRoute.DIRECT_KNOWLEDGE: "Search authorized knowledge and validate citations.",
+            AgentRoute.RESEARCH: "Run bounded multi-source research and validate findings.",
+            AgentRoute.ANALYSIS: "Retrieve authorized records and run controlled analysis.",
+            AgentRoute.ENTERPRISE: "Call one approved read-only enterprise tool with fallback.",
+            AgentRoute.OUT_OF_SCOPE: "Explain the assistant's approved capabilities and duties.",
+        }[route]
 
     async def _direct(
         self,

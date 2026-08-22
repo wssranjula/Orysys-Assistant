@@ -21,10 +21,12 @@ an agent another tool or broaden retrieval scope.
 
 The supervisor is a LangChain agent with no tools and a strict `RouteDecision` response schema. It
 uses the current request and bounded conversation context to select `direct_knowledge`, `research`,
-`analysis`, `enterprise`, or `out_of_scope`. The graph accepts only that enum and maps it to code-defined conditional
-edges; the model cannot create a route, tool, permission, or execution budget. There is deliberately
-no keyword-routing fallback. The router emits an `agent_started` event and a `routing_completed`
-event. Delegated routes additionally
+`analysis`, `enterprise`, or `out_of_scope`. The response schema contains only that enum and uses
+LangChain's retry-capable tool strategy, avoiding unnecessary model-generated routing metadata.
+The graph maps the enum to code-defined conditional edges and generates a safe plan summary for the
+selected route; the model cannot create a route, tool, permission, or execution budget. There is
+deliberately no keyword-routing fallback. The router emits an `agent_started` event and a
+`routing_completed` event. Delegated routes additionally
 emit `subagent_started` and `subagent_completed`; direct retrieval emits retrieval start/completion.
 All specialist results validate through strict Pydantic contracts before the root converts them to
 the frozen API response and citation contracts.

@@ -3,15 +3,12 @@
 from typing import Any, Protocol
 
 from langsmith import traceable
-from pydantic import Field
 
 from orysys_assistant.agent.models import AgentModel, AgentRoute
 
 
 class RouteDecision(AgentModel):
     route: AgentRoute
-    confidence: float = Field(ge=0, le=1)
-    summary: str = Field(min_length=1, max_length=200)
 
 
 class AgentRouter(Protocol):

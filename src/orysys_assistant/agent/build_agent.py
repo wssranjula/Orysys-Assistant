@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
@@ -74,7 +75,13 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
             create_agent(
                 model=model,
                 tools=[],
-                response_format=RouteDecision,
+                response_format=ToolStrategy(
+                    RouteDecision,
+                    handle_errors=(
+                        "Return exactly one valid route: direct_knowledge, research, analysis, "
+                        "enterprise, or out_of_scope."
+                    ),
+                ),
                 system_prompt=(
                     "You are the supervisor for an enterprise knowledge assistant. Select exactly "
                     "one route based on the user's intent and conversation context: "
@@ -86,9 +93,8 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
                     "unrelated general knowledge, entertainment, personal advice, creative "
                     "writing, or requests outside the assistant's approved read-only duties. "
                     "Use out_of_scope for greetings and questions about what the assistant can do "
-                    "so they receive the capabilities response. Return only the "
-                    "structured RouteDecision. The summary must be a short user-safe explanation, "
-                    "not hidden reasoning."
+                    "so they receive the capabilities response. Return only the structured "
+                    "RouteDecision route enum."
                 ),
                 name="supervisor-router",
             )

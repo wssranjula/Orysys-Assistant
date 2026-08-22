@@ -21,7 +21,6 @@ SAFE_ACTIVITY_METADATA_KEYS = frozenset(
         "retrieval_filters",
         "retrieval_mode",
         "route",
-        "routing_confidence",
         "rows_processed",
         "selected_evidence_count",
         "status",

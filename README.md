@@ -210,8 +210,9 @@ the configured 0.65/0.35 weights, and returns attributed evidence. See
 ### Phase 4 agent orchestration
 
 The API now uses one compiled, auditable LangGraph with an LLM supervisor routing node. The
-supervisor returns a strict `RouteDecision` containing one allowed route, confidence, and a short
-user-safe summary; code-controlled conditional edges perform the actual delegation.
+supervisor returns a strict `RouteDecision` containing only one allowed route; code-controlled
+conditional edges perform the actual delegation, and the application generates the user-safe plan
+summary for that route.
 Focused questions use authorized knowledge search directly; multi-document research, structured
 analysis, and enterprise lookups delegate to exactly three static specialists. Every specialist
 has a small code-enforced tool allowlist, while the central gateway continues to enforce RBAC,
