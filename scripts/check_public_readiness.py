@@ -18,6 +18,7 @@ REQUIRED_PATHS = (
     "docs/deployment.md",
     "docs/observability-and-evaluation.md",
     "data/golden_evaluation_report.json",
+    "data/hard_research_questions.json",
 )
 SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),

@@ -84,6 +84,34 @@
       "department": "payments",
       "question": "What resilience tests are required for salary days and payment bursts?",
       "expected_fixture_ids": ["spec-payments-resilience-001"]
+    },
+    {
+      "id": "RET-013",
+      "role": "analyst",
+      "department": "payments",
+      "question": "Why did PAY-1224 create duplicate authorizations during regional failover?",
+      "expected_fixture_ids": ["incident-payments-007"]
+    },
+    {
+      "id": "RET-014",
+      "role": "analyst",
+      "department": "payments",
+      "question": "Which settlement incident exposed missing recovery-region consumer canary coverage?",
+      "expected_fixture_ids": ["incident-payments-008"]
+    },
+    {
+      "id": "RET-015",
+      "role": "analyst",
+      "department": "payments",
+      "question": "Why was PAY-1260 incorrectly declared recovered while settlement remained backlogged?",
+      "expected_fixture_ids": ["incident-payments-009"]
+    },
+    {
+      "id": "RET-016",
+      "role": "analyst",
+      "department": "payments",
+      "question": "Which workload bypassed the global database connection budget in PAY-1288?",
+      "expected_fixture_ids": ["incident-payments-010"]
     }
   ]
 }

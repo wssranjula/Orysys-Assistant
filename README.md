@@ -182,13 +182,18 @@ disabled safely when no key/configuration is supplied.
 
 ### Phase 3 corpus and retrieval
 
-The repository contains 36 deterministic fictional documents across policies, architecture,
-runbooks, incidents, product specifications, and meeting notes. Generate or verify them with:
+The repository contains 48 deterministic fictional documents across policies, architecture,
+runbooks, incidents, product specifications, and meeting notes. Twelve records form an
+interconnected 2026 Project Orion storyline with superseded hypotheses, incomplete controls, and
+cross-document action tracking. Generate or verify the corpus with:
 
 ```bash
 uv run python scripts/generate_sample_documents.py
 uv run python scripts/ingest_sample_documents.py --backend memory
 ```
+
+Eight demanding multi-source prompts and their expected evidence sets are provided in
+[data/hard_research_questions.json](data/hard_research_questions.json).
 
 The memory command executes parsing, section-aware chunking, deterministic IDs, dense encoding,
 BM25 sparse encoding, idempotent upsert, stale-vector cleanup, and manifest generation without

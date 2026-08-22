@@ -18,10 +18,12 @@ from orysys_assistant.retrieval.vector_store import InMemoryVectorStore, Pinecon
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def ingest(backend: str) -> None:
+async def ingest(backend: str, manifest_path: Path | None = None) -> None:
     settings = Settings()
     corpus_root = ROOT / "data" / "sample_documents"
-    manifest_path = ROOT / ".data" / "ingestion_manifest.json"
+    manifest_path = manifest_path or ROOT / ".data" / "ingestion_manifest.json"
+    if not manifest_path.is_absolute():
+        manifest_path = ROOT / manifest_path
 
     if backend == "pinecone":
         if not settings.pinecone_api_key or not settings.openai_api_key:
@@ -72,8 +74,13 @@ async def ingest(backend: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=("memory", "pinecone"), default="memory")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="Manifest output path (defaults to .data/ingestion_manifest.json).",
+    )
     args = parser.parse_args()
-    asyncio.run(ingest(args.backend))
+    asyncio.run(ingest(args.backend, args.manifest))
 
 
 if __name__ == "__main__":

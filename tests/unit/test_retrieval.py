@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 
+from orysys_assistant.agent.research_graph import ResearchLimits, ResearchWorkflow
+from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import InvalidRequestError, RetrievalUnavailableError
 from orysys_assistant.domain.models import Role
@@ -70,7 +72,7 @@ def test_corpus_has_required_categories_metadata_and_deterministic_ids() -> None
     parser = MarkdownDocumentParser(CORPUS_ROOT)
     documents = [parser.parse(path) for path in paths]
 
-    assert 30 <= len(documents) <= 50
+    assert len(documents) == 48
     assert {document.document_type for document in documents} == {
         "policy",
         "architecture",
@@ -95,6 +97,20 @@ def test_corpus_has_required_categories_metadata_and_deterministic_ids() -> None
     assert "IGNORE ALL PREVIOUS INSTRUCTIONS" in " ".join(
         section.content for section in injection.sections
     )
+    assert {
+        "incident-payments-007",
+        "incident-payments-008",
+        "incident-payments-009",
+        "incident-payments-010",
+        "meeting-orion-readiness-001",
+        "meeting-payments-reliability-003",
+        "arch-instant-payments-continuity-001",
+        "arch-payment-connection-governance-001",
+        "runbook-payment-regional-failover-001",
+        "runbook-payment-reconciliation-001",
+        "policy-resilience-change-assurance-001",
+        "spec-instant-payment-continuity-001",
+    } <= {document.fixture_id for document in documents}
 
 
 def test_section_chunking_is_bounded_overlapping_and_deterministic() -> None:
@@ -142,9 +158,9 @@ async def test_reingestion_upserts_same_ids_without_duplicates(tmp_path: Path) -
     first = await pipeline.run()
     second = await pipeline.run()
 
-    assert first.documents == second.documents == 36
-    assert first.chunks == second.chunks == 36
-    assert store.count("commercial-bank") == 36
+    assert first.documents == second.documents == 48
+    assert first.chunks == second.chunks == 48
+    assert store.count("commercial-bank") == 48
     assert store.count("another-namespace") == 0
     assert second.deleted_stale == 0
 
@@ -176,6 +192,63 @@ async def test_hybrid_recall_at_five_and_zero_unauthorized_chunks(tmp_path: Path
         assert all(item.chunk_id for item in evidence)
 
     assert retrieved_expected / expected_total >= 0.80
+
+
+def test_hard_research_questions_reference_real_multi_source_evidence() -> None:
+    dataset = json.loads((ROOT / "data" / "hard_research_questions.json").read_text())
+    parser = MarkdownDocumentParser(CORPUS_ROOT)
+    documents = [parser.parse(path) for path in sorted(CORPUS_ROOT.rglob("*.md"))]
+    fixture_types = {document.fixture_id: document.document_type for document in documents}
+
+    assert len(dataset["cases"]) == 8
+    assert {case["id"] for case in dataset["cases"]} == {
+        f"HRQ-{index:03d}" for index in range(1, 9)
+    }
+    for case in dataset["cases"]:
+        fixtures = case["expected_fixture_ids"]
+        assert len(fixtures) >= 4
+        assert set(fixtures) <= fixture_types.keys()
+        assert len({fixture_types[fixture_id] for fixture_id in fixtures}) >= 2
+        assert case["research_challenge"]
+
+
+@pytest.mark.asyncio
+async def test_hard_control_audit_reaches_all_expected_multi_source_evidence(
+    tmp_path: Path,
+) -> None:
+    retrieval, store = await build_retrieval(tmp_path)
+    settings = Settings(_env_file=None)
+    gateway = ToolGateway(AuthorizationPolicy())
+    gateway.register(knowledge_search_spec(retrieval))
+    workflow = ResearchWorkflow(
+        ScopedToolbox(gateway, frozenset({"knowledge_search"})),
+        ResearchLimits.from_settings(settings),
+    )
+    identity = user(Role.ANALYST, "payments")
+    context = TrustedRequestContext(
+        identity=identity,
+        access_scope=AccessScopeService(settings).build(identity),
+        rate_limit_remaining=100,
+    )
+    dataset = json.loads((ROOT / "data" / "hard_research_questions.json").read_text())
+    case = dataset["cases"][0]
+    transitions: list[Any] = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    try:
+        execution = await workflow.run(case["question"], context, capture)
+    finally:
+        await store.close()
+
+    observed = {item.metadata["fixture_id"] for item in execution.evidence}
+    assert set(case["expected_fixture_ids"]) <= observed
+    assert execution.result.partial is False
+    assert len(execution.evidence) >= 7
+    assert {"planner", "workers", "reducer", "coverage_check", "finalize"} <= {
+        transition.node for transition in transitions
+    }
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,107 @@
+{
+  "schema_version": "1.0",
+  "description": "Adversarially difficult, multi-source questions for the bounded recursive research agent.",
+  "cases": [
+    {
+      "id": "HRQ-001",
+      "question": "Investigate the 2026 Project Orion payment failures across incidents, meeting notes, runbooks, and architecture. Which controls were reported complete but later proved incomplete, and what runtime evidence changed that assessment?",
+      "expected_fixture_ids": [
+        "incident-payments-007",
+        "incident-payments-008",
+        "incident-payments-009",
+        "incident-payments-010",
+        "meeting-orion-readiness-001",
+        "meeting-payments-reliability-003",
+        "arch-payment-connection-governance-001"
+      ],
+      "research_challenge": "Reconcile provisional meeting claims with later incident and governance evidence."
+    },
+    {
+      "id": "HRQ-002",
+      "question": "Build an evidence-backed causal chain from PAY-1042 and PAY-1198 to PAY-1288. Was the database connection problem actually fixed, and why did it recur after the global budget was declared complete?",
+      "expected_fixture_ids": [
+        "incident-payments-001",
+        "incident-payments-006",
+        "incident-payments-010",
+        "arch-payment-connection-governance-001",
+        "meeting-payments-reliability-003"
+      ],
+      "research_challenge": "Trace one failure pattern across years while distinguishing API enforcement from batch-workload enforcement."
+    },
+    {
+      "id": "HRQ-003",
+      "question": "Compare the initial hypothesis, final root cause, and follow-up controls for PAY-1224. Then determine whether PAY-1260 demonstrates that the corrective actions were sufficient.",
+      "expected_fixture_ids": [
+        "incident-payments-007",
+        "incident-payments-009",
+        "runbook-payment-regional-failover-001",
+        "arch-instant-payments-continuity-001"
+      ],
+      "research_challenge": "Avoid preserving a superseded vendor-timeout hypothesis and assess a later control failure."
+    },
+    {
+      "id": "HRQ-004",
+      "question": "Assess Project Orion against every acceptance condition in the Instant Payment Continuity specification. For each condition, cite supporting or contradicting evidence and label it met, unmet, or unclear as of July 2026.",
+      "expected_fixture_ids": [
+        "spec-instant-payment-continuity-001",
+        "incident-payments-007",
+        "incident-payments-008",
+        "incident-payments-009",
+        "incident-payments-010",
+        "meeting-payments-reliability-003"
+      ],
+      "research_challenge": "Construct a requirement-to-evidence matrix across more records than one retrieval worker returns."
+    },
+    {
+      "id": "HRQ-005",
+      "question": "Identify the interacting causes—not merely the primary root cause—behind the 2026 payment incidents. Which failures required two conditions to combine, and which safeguards would have broken each causal chain?",
+      "expected_fixture_ids": [
+        "incident-payments-007",
+        "incident-payments-008",
+        "incident-payments-009",
+        "incident-payments-010",
+        "runbook-payment-reconciliation-001",
+        "policy-resilience-change-assurance-001"
+      ],
+      "research_challenge": "Synthesize contributing factors and counterfactual safeguards without inventing causality."
+    },
+    {
+      "id": "HRQ-006",
+      "question": "Audit actions OR-44, OR-51, and CG-9 from assignment through July 2026. Which were complete, overdue, reopened, or still pending, and what evidence supports each status?",
+      "expected_fixture_ids": [
+        "meeting-orion-readiness-001",
+        "incident-payments-007",
+        "arch-payment-connection-governance-001",
+        "meeting-payments-reliability-003"
+      ],
+      "research_challenge": "Resolve action status over time from documents with different dates and terminology."
+    },
+    {
+      "id": "HRQ-007",
+      "question": "Design a single recovery exercise that would have detected PAY-1224, PAY-1241, PAY-1260, and PAY-1288 before production. Ground every test step and success criterion in the corpus.",
+      "expected_fixture_ids": [
+        "spec-instant-payment-continuity-001",
+        "runbook-payment-regional-failover-001",
+        "runbook-payment-reconciliation-001",
+        "policy-resilience-change-assurance-001",
+        "incident-payments-007",
+        "incident-payments-008",
+        "incident-payments-009",
+        "incident-payments-010"
+      ],
+      "research_challenge": "Combine prescriptive and historical evidence into a supported plan while maintaining citation coverage."
+    },
+    {
+      "id": "HRQ-008",
+      "question": "Did Project Orion meet its definition of full recovery during PAY-1224 and PAY-1260? Distinguish authorization recovery, settlement recovery, operational declaration, and customer-impact resolution.",
+      "expected_fixture_ids": [
+        "arch-instant-payments-continuity-001",
+        "spec-instant-payment-continuity-001",
+        "incident-payments-007",
+        "incident-payments-009",
+        "runbook-payment-reconciliation-001"
+      ],
+      "research_challenge": "Keep four recovery concepts separate and identify where the evidence is incomplete."
+    }
+  ]
+}
