@@ -6,10 +6,9 @@ Research specialist's `knowledge_search` toolbox, which then crosses the central
 trusted access-scope enforcement.
 
 ```text
-START → normalize_scope → planner → workers → reducer → coverage_check
-                                                        ├─ sufficient/limited → finalize → END
-                                                        └─ gap + budget → followup_planner ─┐
-                                                                                           └→ workers
+START → normalize_scope → planner → workers → Send(worker × N) → reducer → coverage_check
+                                                                         ├─ sufficient/limited → finalize → END
+                                                                         └─ gap + budget → followup_planner → workers
 ```
 
 ## Nodes
@@ -17,8 +16,8 @@ START → normalize_scope → planner → workers → reducer → coverage_check
 - `normalize_scope` removes redundant whitespace and derives only explicit safe filters.
 - `planner` creates at most four independent tasks. Annual incident questions are partitioned by
   quarter; other questions are partitioned by evidence type.
-- `workers` uses `asyncio.gather` behind a semaphore. Each worker has its own timeout and returns a
-  strict `ResearchTaskResult`, including a safe failure warning when retrieval fails.
+- `workers` emits LangGraph `Send` commands for native map/reduce fan-out. Each worker has its own
+  timeout and returns a strict reducer update, including a safe failure warning when retrieval fails.
 - `reducer` deduplicates evidence by evidence ID and findings by normalized claim, preserving all
   supporting evidence IDs.
 - `coverage_check` assesses unique evidence and successful task coverage.
@@ -48,3 +47,15 @@ workers, reduction, coverage, follow-up, and finalization. LangGraph traces ever
 worker also has explicit LangSmith trace metadata. Client cancellation propagates through graph
 fan-out. One failed worker does not cancel successful siblings; overall deadline or exhausted budgets
 return a structured partial result rather than starting unbounded work.
+
+## Hard research corpus
+
+The Project Orion storyline spans twelve records across incidents, meeting notes, runbooks,
+architecture, policy, and specification evidence. It intentionally includes an initial incident
+hypothesis later superseded by the post-incident finding, controls described as complete for only
+some workload classes, and action items whose status changes over time.
+
+Use the eight prompts in `data/hard_research_questions.json` to exercise planning, parallel
+retrieval, evidence reduction, temporal reconciliation, and citation coverage. Recursive follow-up
+is coverage-driven: it runs when the first pass lacks sufficient authorized evidence, not merely
+because a prompt is long.

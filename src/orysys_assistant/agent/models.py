@@ -18,6 +18,7 @@ class AgentRoute(StrEnum):
     RESEARCH = "research"
     ANALYSIS = "analysis"
     ENTERPRISE = "enterprise"
+    OUT_OF_SCOPE = "out_of_scope"
 
 
 class AgentTransition(AgentModel):
@@ -101,3 +102,9 @@ class AgentExecutionResult(AgentModel):
     warnings: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+
+
+class GroundedAnswerDraft(AgentModel):
+    """Model-generated prose; citations remain resolved by deterministic application code."""
+
+    answer: str = Field(min_length=1, max_length=20_000)

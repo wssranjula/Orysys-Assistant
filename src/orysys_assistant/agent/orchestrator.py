@@ -1,7 +1,16 @@
 """Controlled root orchestration used by the API and deterministic tests."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import suppress
+from dataclasses import dataclass
+from typing import Annotated, Any, TypedDict
+from uuid import uuid4
 
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langgraph.config import get_stream_writer
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.runtime import Runtime
 from langsmith import traceable
 
 from orysys_assistant.agent.models import (
@@ -10,9 +19,10 @@ from orysys_assistant.agent.models import (
     AgentTransition,
     AnalysisExecution,
     EnterpriseExecution,
+    GroundedAnswerDraft,
     ResearchExecution,
 )
-from orysys_assistant.agent.router import IntentRouter
+from orysys_assistant.agent.router import AgentRouter
 from orysys_assistant.agent.subagents import (
     AnalysisSubagent,
     EnterpriseToolSubagent,
@@ -29,23 +39,75 @@ from orysys_assistant.tools.knowledge_search import KNOWLEDGE_QUERY_MAX_LENGTH
 TransitionSink = Callable[[AgentTransition], Awaitable[None]]
 
 
+class RootAgentState(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
+    question: str
+    route: AgentRoute | None
+    result: AgentExecutionResult | None
+
+
+@dataclass(frozen=True, slots=True)
+class RootAgentContext:
+    request_context: TrustedRequestContext
+    transition_sink: TransitionSink | None = None
+    conversation_summary: str = ""
+    thread_id: str | None = None
+
+
 class RootOrchestrator:
     name = "root_deep_agent"
 
     def __init__(
         self,
         *,
-        router: IntentRouter,
+        router: AgentRouter,
         direct_toolbox: ScopedToolbox,
         research: ResearchSubagent,
         analysis: AnalysisSubagent,
         enterprise: EnterpriseToolSubagent,
+        checkpointer: Any = None,
+        synthesizer: Any = None,
     ) -> None:
         self._router = router
         self._direct_toolbox = direct_toolbox
         self._research = research
         self._analysis = analysis
         self._enterprise = enterprise
+        self._checkpointer = checkpointer
+        self._synthesizer = synthesizer
+        self.graph = self._compile()
+
+    def _compile(self) -> Any:
+        builder = StateGraph(RootAgentState, context_schema=RootAgentContext)
+        builder.add_node("route", self._route_node)
+        builder.add_node("direct_knowledge", self._direct_node)
+        builder.add_node("research", self._research_node)
+        builder.add_node("analysis", self._analysis_node)
+        builder.add_node("enterprise", self._enterprise_node)
+        builder.add_node("out_of_scope", self._out_of_scope_node)
+        builder.add_node("synthesize", self._synthesize_node)
+        builder.add_edge(START, "route")
+        builder.add_conditional_edges(
+            "route",
+            self._route_after_classification,
+            {
+                AgentRoute.DIRECT_KNOWLEDGE.value: "direct_knowledge",
+                AgentRoute.RESEARCH.value: "research",
+                AgentRoute.ANALYSIS.value: "analysis",
+                AgentRoute.ENTERPRISE.value: "enterprise",
+                AgentRoute.OUT_OF_SCOPE.value: "out_of_scope",
+            },
+        )
+        for node in (
+            "direct_knowledge",
+            "research",
+            "analysis",
+            "enterprise",
+            "out_of_scope",
+        ):
+            builder.add_edge(node, "synthesize")
+        builder.add_edge("synthesize", END)
+        return builder.compile(checkpointer=self._checkpointer)
 
     @traceable(
         name="root-deep-agent-orchestration",
@@ -60,19 +122,87 @@ class RootOrchestrator:
         conversation_summary: str = "",
         thread_id: str | None = None,
     ) -> AgentExecutionResult:
+        final = await self.graph.ainvoke(
+            {
+                "messages": [HumanMessage(content=question)],
+                "question": question,
+                "route": None,
+                "result": None,
+            },
+            config=self._graph_config(thread_id),
+            context=RootAgentContext(
+                request_context=context,
+                transition_sink=transition_sink,
+                conversation_summary=conversation_summary,
+                thread_id=thread_id,
+            ),
+        )
+        result = final["result"]
+        if result is None:
+            raise RuntimeError("The agent graph completed without a result.")
+        return AgentExecutionResult.model_validate(result)
+
+    async def stream(
+        self,
+        question: str,
+        context: TrustedRequestContext,
+        conversation_summary: str = "",
+        thread_id: str | None = None,
+    ) -> AsyncIterator[AgentTransition | AgentExecutionResult]:
+        """Stream native LangGraph updates followed by the final typed result."""
+
+        graph_context = RootAgentContext(
+            request_context=context,
+            # The compiled graph owns production conversation history. The explicit
+            # summary remains a compatibility input when no checkpointer is configured.
+            conversation_summary=conversation_summary if self._checkpointer is None else "",
+            thread_id=thread_id,
+        )
+        async for part in self.graph.astream(
+            {
+                "messages": [HumanMessage(content=question)],
+                "question": question,
+                "route": None,
+                "result": None,
+            },
+            config=self._graph_config(thread_id),
+            context=graph_context,
+            stream_mode=["custom", "updates"],
+            version="v2",
+        ):
+            if part["type"] == "custom":
+                yield AgentTransition.model_validate(part["data"])
+                continue
+            for node, update in part["data"].items():
+                if node != "synthesize":
+                    continue
+                result = update.get("result") if isinstance(update, dict) else None
+                if result is not None:
+                    yield AgentExecutionResult.model_validate(result)
+
+    def _graph_config(self, thread_id: str | None) -> dict[str, Any] | None:
+        if self._checkpointer is None:
+            return None
+        return {"configurable": {"thread_id": thread_id or str(uuid4())}}
+
+    async def _route_node(
+        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
+    ) -> dict[str, Any]:
         await self._emit(
-            transition_sink,
+            runtime.context.transition_sink,
             AgentTransition(
                 event_type="agent_started",
                 agent=self.name,
                 node="intent_routing",
                 status="started",
-                message="Root agent is classifying the request.",
+                message="Supervisor agent is classifying the request.",
             ),
         )
-        route = self._router.route(question)
+        summary = runtime.context.conversation_summary or self._message_history(state["messages"])
+        decision = await self._router.route(state["question"], summary)
+        route = decision.route
         await self._emit(
-            transition_sink,
+            runtime.context.transition_sink,
             AgentTransition(
                 event_type="routing_completed",
                 agent=self.name,
@@ -85,17 +215,156 @@ class RootOrchestrator:
                 },
             ),
         )
+        return {
+            "route": route,
+            "question": self._with_conversation_context(
+                state["question"], summary
+            ),
+        }
 
-        grounded_question = self._with_conversation_context(question, conversation_summary)
-        if route is AgentRoute.DIRECT_KNOWLEDGE:
-            return await self._direct(grounded_question, context, transition_sink)
-        if route is AgentRoute.RESEARCH:
-            return await self._delegate_research(
-                grounded_question, context, transition_sink, thread_id
+    @staticmethod
+    def _route_after_classification(state: RootAgentState) -> str:
+        route = state["route"]
+        if route is None:
+            raise RuntimeError("The routing node did not select a route.")
+        return route.value
+
+    async def _direct_node(
+        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
+    ) -> dict[str, AgentExecutionResult]:
+        return {
+            "result": await self._direct(
+                state["question"], runtime.context.request_context, runtime.context.transition_sink
             )
-        if route is AgentRoute.ANALYSIS:
-            return await self._delegate_analysis(grounded_question, context, transition_sink)
-        return await self._delegate_enterprise(grounded_question, context, transition_sink)
+        }
+
+    async def _research_node(
+        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
+    ) -> dict[str, AgentExecutionResult]:
+        relay = self._relay_sink(runtime.context)
+        return {
+            "result": await self._delegate_research(
+                state["question"],
+                runtime.context.request_context,
+                relay,
+                runtime.context.thread_id,
+            )
+        }
+
+    @staticmethod
+    def _relay_sink(context: RootAgentContext) -> TransitionSink:
+        writer: Callable[[Any], None] | None = None
+        with suppress(RuntimeError):
+            writer = get_stream_writer()
+
+        async def relay(transition: AgentTransition) -> None:
+            if writer is not None:
+                writer(transition.model_dump(mode="json"))
+            if context.transition_sink is not None:
+                await context.transition_sink(transition)
+
+        return relay
+
+    async def _analysis_node(
+        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
+    ) -> dict[str, AgentExecutionResult]:
+        return {
+            "result": await self._delegate_analysis(
+                state["question"],
+                runtime.context.request_context,
+                self._relay_sink(runtime.context),
+            )
+        }
+
+    async def _enterprise_node(
+        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
+    ) -> dict[str, AgentExecutionResult]:
+        return {
+            "result": await self._delegate_enterprise(
+                state["question"],
+                runtime.context.request_context,
+                self._relay_sink(runtime.context),
+            )
+        }
+
+    @staticmethod
+    def _out_of_scope_node(state: RootAgentState) -> dict[str, AgentExecutionResult]:
+        return {
+            "result": AgentExecutionResult(
+                route=AgentRoute.OUT_OF_SCOPE,
+                answer=(
+                    "I’m the Commercial Bank organizational assistant. I can help you:\n"
+                    "- find authorized information in internal policies, runbooks, incidents, "
+                    "architecture, product specifications, and meeting notes;\n"
+                    "- investigate and compare evidence across multiple internal sources;\n"
+                    "- calculate approved counts, percentages, distributions, and trends; and\n"
+                    "- look up approved employee, service-catalog, ownership, on-call, and "
+                    "incident records.\n\n"
+                    "I can’t help with unrelated general questions, entertainment, personal "
+                    "advice, or actions outside these approved read-only duties."
+                ),
+            )
+        }
+
+    async def _synthesize_node(self, state: RootAgentState) -> dict[str, Any]:
+        result = state["result"]
+        if result is None:
+            raise RuntimeError("The specialist node did not produce a result.")
+        if self._synthesizer is not None and result.route is not AgentRoute.OUT_OF_SCOPE:
+            evidence = "\n\n".join(
+                f"[{index}] {item.title}\n{unwrap_evidence(item.content)[:2_000]}"
+                for index, item in enumerate(result.evidence, start=1)
+            )
+            prompt = (
+                f"User question: {state['question']}\n\n"
+                f"Specialist result:\n{result.answer}\n\n"
+                "Authorized evidence:\n"
+                f"{evidence or 'No document evidence; use only the tool result.'}"
+            )
+            try:
+                generated = await self._synthesizer.ainvoke(
+                    {"messages": [{"role": "user", "content": prompt}]}
+                )
+                draft = GroundedAnswerDraft.model_validate(generated["structured_response"])
+                result = result.model_copy(update={"answer": draft.answer})
+            except Exception as exc:
+                result = result.model_copy(
+                    update={
+                        "status": (
+                            ResponseStatus.PARTIAL
+                            if result.status is ResponseStatus.COMPLETE
+                            else result.status
+                        ),
+                        "warnings": [
+                            *result.warnings,
+                            f"Model synthesis was unavailable: {type(exc).__name__}.",
+                        ],
+                    }
+                )
+        return {
+            "result": result,
+            "messages": [AIMessage(content=result.answer)],
+        }
+
+    @staticmethod
+    def _message_history(messages: list[AnyMessage]) -> str:
+        prior = messages[:-1]
+        transcript = "\n".join(
+            f"{message.type.title()}: {message.content}"
+            for message in prior[-20:]
+            if isinstance(message.content, str)
+        )
+        return transcript[-8_000:]
+
+    @staticmethod
+    def _plan_summary(route: AgentRoute) -> str:
+        return {
+            AgentRoute.DIRECT_KNOWLEDGE: "Search authorized knowledge and validate citations.",
+            AgentRoute.RESEARCH: "Run bounded multi-source research and validate findings.",
+            AgentRoute.ANALYSIS: "Retrieve authorized records and run controlled analysis.",
+            AgentRoute.ENTERPRISE: "Call one approved read-only enterprise tool with fallback.",
+            AgentRoute.OUT_OF_SCOPE: "Explain the assistant's approved capabilities and duties.",
+        }[route]
 
     async def _direct(
         self,
@@ -206,6 +475,8 @@ class RootOrchestrator:
 
     @staticmethod
     async def _emit(sink: TransitionSink | None, transition: AgentTransition) -> None:
+        with suppress(RuntimeError):
+            get_stream_writer()(transition.model_dump(mode="json"))
         if sink is not None:
             await sink(transition)
 
@@ -345,12 +616,3 @@ class RootOrchestrator:
         if remaining <= 0:
             return question
         return f"{question}{separator}{summary[-remaining:]}"
-
-    @staticmethod
-    def _plan_summary(route: AgentRoute) -> str:
-        return {
-            AgentRoute.DIRECT_KNOWLEDGE: "Search authorized knowledge and validate citations.",
-            AgentRoute.RESEARCH: "Delegate bounded multi-source research, then validate findings.",
-            AgentRoute.ANALYSIS: "Retrieve authorized records and run controlled analysis.",
-            AgentRoute.ENTERPRISE: "Call one approved read-only enterprise tool with fallback.",
-        }[route]

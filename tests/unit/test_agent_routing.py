@@ -2,19 +2,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain.agents.structured_output import ToolStrategy
 
-import orysys_assistant.agent.build_agent as build_agent_module
+import orysys_assistant.agent.build_agent as agent_factory
 from orysys_assistant.agent.build_agent import (
     AgentDependencies,
-    build_deep_agent_graph,
     build_root_orchestrator,
 )
-from orysys_assistant.agent.models import AgentRoute
+from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
 from orysys_assistant.agent.orchestrator import RootOrchestrator
+from orysys_assistant.agent.router import LLMIntentRouter, RouteDecision
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import AuthorizationError
 from orysys_assistant.domain.models import Role
+from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.retrieval.runtime import build_retrieval_runtime
 from orysys_assistant.security.access_scope import AccessScopeService
 from orysys_assistant.security.authorization import AuthorizationPolicy
@@ -45,6 +47,27 @@ def context(role: Role) -> TrustedRequestContext:
     )
 
 
+class TestRouter:
+    routes = {
+        "What is the remote working policy?": AgentRoute.DIRECT_KNOWLEDGE,
+        "Investigate payment outages across the last year.": AgentRoute.RESEARCH,
+        "Count payment incidents by root cause.": AgentRoute.ANALYSIS,
+        "Who owns the payment service?": AgentRoute.ENTERPRISE,
+        "Investigate recurring payment incidents across sources.": AgentRoute.RESEARCH,
+        "Tell me a joke about databases.": AgentRoute.OUT_OF_SCOPE,
+    }
+
+    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
+        route = self.routes.get(question, AgentRoute.DIRECT_KNOWLEDGE)
+        return RouteDecision(route=route)
+
+
+def test_route_decision_contains_only_the_branch_enum() -> None:
+    schema = RouteDecision.model_json_schema()
+
+    assert set(schema["properties"]) == {"route"}
+
+
 def test_conversation_context_fits_the_knowledge_search_contract() -> None:
     question = "Were there any incidents related to attachments?"
     summary = "older context " * 1_000 + "most recent attachment discussion"
@@ -64,6 +87,132 @@ def test_long_current_question_is_bounded_without_conversation_context() -> None
     assert KnowledgeSearchInput(query=query).query == query
 
 
+@pytest.mark.asyncio
+async def test_llm_router_validates_the_supervisor_structured_decision() -> None:
+    class FakeRoutingAgent:
+        def __init__(self) -> None:
+            self.request: dict[str, Any] = {}
+
+        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
+            self.request = request
+            return {
+                "structured_response": {
+                    "route": "research",
+                }
+            }
+
+    agent = FakeRoutingAgent()
+    decision = await LLMIntentRouter(agent).route(
+        "Would the same control apply to both historical incidents?",
+        "The prior turn discussed two payment services.",
+    )
+
+    assert decision.route is AgentRoute.RESEARCH
+    prompt = agent.request["messages"][0]["content"]
+    assert "historical incidents" in prompt
+    assert "two payment services" in prompt
+
+
+@pytest.mark.asyncio
+async def test_enterprise_misroute_is_corrected_for_project_orion_document_research() -> None:
+    class MisroutingAgent:
+        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {"structured_response": {"route": "enterprise"}}
+
+    question = (
+        "Investigate the 2026 Project Orion payment failures across incidents, meeting notes, "
+        "runbooks, and architecture. Which controls were reported complete but later proved "
+        "incomplete, and what runtime evidence changed that assessment?"
+    )
+
+    decision = await LLMIntentRouter(MisroutingAgent()).route(question)
+
+    assert decision.route is AgentRoute.RESEARCH
+
+
+@pytest.mark.asyncio
+async def test_focused_incident_system_lookup_remains_enterprise() -> None:
+    class EnterpriseAgent:
+        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
+            return {"structured_response": {"route": "enterprise"}}
+
+    decision = await LLMIntentRouter(EnterpriseAgent()).route(
+        "Look up incident INC-2025-001 in the incident system."
+    )
+
+    assert decision.route is AgentRoute.ENTERPRISE
+
+
+def test_production_factory_has_no_deterministic_router_fallback() -> None:
+    settings = Settings(
+        openai_api_key=None,
+        agent_synthesis_enabled=False,
+        _env_file=None,
+    )
+
+    with pytest.raises(RuntimeError, match="LLM supervisor requires OPENAI_API_KEY"):
+        build_root_orchestrator(
+            AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings)
+        )
+
+
+def test_production_supervisor_uses_retryable_route_only_tool_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_create_agent(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(agent_factory, "ChatOpenAI", lambda **_: object())
+    monkeypatch.setattr(agent_factory, "create_agent", fake_create_agent)
+
+    build_root_orchestrator(
+        AgentDependencies(
+            ToolGateway(AuthorizationPolicy()),
+            settings=Settings(
+                openai_api_key="test-key",
+                agent_synthesis_enabled=False,
+                _env_file=None,
+            ),
+        )
+    )
+
+    strategy = captured["response_format"]
+    assert isinstance(strategy, ToolStrategy)
+    assert strategy.schema is RouteDecision
+    assert set(strategy.schema_specs[0].json_schema["properties"]) == {"route"}
+    assert isinstance(strategy.handle_errors, str)
+
+
+@pytest.mark.asyncio
+async def test_out_of_scope_route_uses_no_tools_and_returns_duties() -> None:
+    orchestrator = build_root_orchestrator(
+        AgentDependencies(ToolGateway(AuthorizationPolicy()), router=TestRouter())
+    )
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    request_context = context(Role.VIEWER)
+    result = await orchestrator.run(
+        "Tell me a joke about databases.", request_context, capture
+    )
+    validation = OutputValidator().validate(result, request_context.access_scope)
+
+    assert result.route is AgentRoute.OUT_OF_SCOPE
+    assert result.citations == []
+    assert "organizational assistant" in result.answer
+    assert "approved read-only duties" in result.answer
+    assert validation.valid is True
+    assert [item.event_type for item in transitions] == [
+        "agent_started",
+        "routing_completed",
+    ]
+
+
 async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
     runtime = await build_retrieval_runtime(
         Settings(retrieval_backend="memory", _env_file=None), project_root
@@ -73,7 +222,7 @@ async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
     gateway.register(python_analysis_spec(1_000))
     for spec in enterprise_tool_specs(InMemoryEnterpriseClient(), 1, 100_000):
         gateway.register(spec)
-    return build_root_orchestrator(AgentDependencies(gateway)), runtime
+    return build_root_orchestrator(AgentDependencies(gateway, router=TestRouter())), runtime
 
 
 @pytest.mark.asyncio
@@ -123,6 +272,50 @@ async def test_root_routes_simple_and_complex_requests_with_structured_outputs()
 
 
 @pytest.mark.asyncio
+async def test_production_graph_streams_native_activity_and_one_result() -> None:
+    orchestrator, runtime = await build_orchestrator(Path(__file__).parents[2])
+    try:
+        updates = [
+            update
+            async for update in orchestrator.stream(
+                "Investigate recurring payment incidents across sources.",
+                context(Role.ANALYST),
+            )
+        ]
+    finally:
+        await runtime.close()
+
+    transitions = [item for item in updates if isinstance(item, AgentTransition)]
+    results = [item for item in updates if isinstance(item, AgentExecutionResult)]
+    assert len(results) == 1
+    assert results[0].route is AgentRoute.RESEARCH
+    assert {item.node for item in transitions} >= {
+        "intent_routing",
+        "planner",
+        "workers",
+        "reducer",
+        "coverage_check",
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_stream_relays_specialist_tool_activity() -> None:
+    orchestrator, runtime = await build_orchestrator(Path(__file__).parents[2])
+    try:
+        updates = [
+            update
+            async for update in orchestrator.stream(
+                "Who owns the payment service?", context(Role.ANALYST)
+            )
+        ]
+    finally:
+        await runtime.close()
+
+    transitions = [item for item in updates if isinstance(item, AgentTransition)]
+    assert any(item.event_type == "tool_completed" for item in transitions)
+
+
+@pytest.mark.asyncio
 async def test_enterprise_route_enforces_rbac_before_handler() -> None:
     orchestrator, runtime = await build_orchestrator(Path(__file__).parents[2])
     try:
@@ -145,47 +338,16 @@ async def test_agent_tool_surface_denies_unapproved_tool_before_gateway() -> Non
         )
 
 
-def test_secure_deep_agent_harness_compiles_with_static_specialists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    graph = build_deep_agent_graph(
-        model="openai:gpt-5-mini",
-        gateway=ToolGateway(AuthorizationPolicy()),
-        context=context(Role.ADMINISTRATOR),
-        project_root=Path(__file__).parents[2],
-    )
+def test_production_orchestrator_is_a_compiled_langgraph() -> None:
+    gateway = ToolGateway(AuthorizationPolicy())
+    orchestrator = build_root_orchestrator(AgentDependencies(gateway, router=TestRouter()))
 
-    assert type(graph).__name__ == "CompiledStateGraph"
-    assert {"model", "tools", "SkillsMiddleware.before_agent"} <= set(graph.nodes)
-
-
-def test_deep_agent_specialists_receive_only_their_approved_tools(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        build_agent_module,
-        "create_deep_agent",
-        lambda **arguments: arguments,
-    )
-    built = build_deep_agent_graph(
-        model="openai:gpt-5-mini",
-        gateway=ToolGateway(AuthorizationPolicy()),
-        context=context(Role.ADMINISTRATOR),
-        project_root=Path(__file__).parents[2],
-    )
-    surfaces = {
-        agent["name"]: {tool.name for tool in agent["tools"]}
-        for agent in built["subagents"]
-    }
-
-    assert surfaces["research"] == {"knowledge_search"}
-    assert surfaces["analysis"] == {"knowledge_search", "structured_analysis"}
-    assert surfaces["enterprise-tools"] == {
-        "get_employee",
-        "search_employees",
-        "get_service",
-        "search_services",
-        "get_incident",
-        "search_incidents",
-    }
+    assert type(orchestrator.graph).__name__ == "CompiledStateGraph"
+    assert {
+        "route",
+        "direct_knowledge",
+        "research",
+        "analysis",
+        "enterprise",
+        "out_of_scope",
+    } <= set(orchestrator.graph.nodes)

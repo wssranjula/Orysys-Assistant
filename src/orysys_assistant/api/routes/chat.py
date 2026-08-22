@@ -165,7 +165,6 @@ async def stream_chat_events(
                 metadata={"evidence_count": len(conversation.evidence_ids)},
             ),
         )
-        transitions: asyncio.Queue[AgentTransition] = asyncio.Queue()
         langsmith_client = (
             get_langsmith_client(settings.langsmith_api_key, settings.langsmith_endpoint)
             if settings.langsmith_enabled and settings.langsmith_api_key
@@ -182,42 +181,76 @@ async def stream_chat_events(
                 "agent_name": orchestrator.name,
             }
         ):
-            agent_task = asyncio.create_task(
-                orchestrator.run(
-                    payload.message,
-                    context,
-                    transitions.put,
-                    conversation.summary,
-                    f"{context.identity.user_id}:{conversation_id}",
-                )
-            )
-        try:
-            async with asyncio.timeout(settings.request_timeout_seconds):
-                while not agent_task.done() or not transitions.empty():
-                    await _ensure_connected(request)
-                    try:
-                        transition = await asyncio.wait_for(transitions.get(), timeout=0.05)
-                    except TimeoutError:
-                        continue
-                    yield _sse(
-                        "activity",
-                        _activity(
-                            event_type=ActivityEventType(transition.event_type),
-                            request_id=request_id,
-                            conversation_id=conversation_id,
-                            status=ActivityStatus(transition.status),
-                            message=transition.message,
-                            agent=transition.agent,
-                            node=transition.node,
-                            metadata=transition.metadata,
-                        ),
+            stream_method = getattr(orchestrator, "stream", None)
+            if stream_method is not None:
+                result = None
+                async with asyncio.timeout(settings.request_timeout_seconds):
+                    async for update in stream_method(
+                        payload.message,
+                        context,
+                        conversation.summary,
+                        f"{context.identity.user_id}:{conversation_id}",
+                    ):
+                        await _ensure_connected(request)
+                        if isinstance(update, AgentTransition):
+                            yield _sse(
+                                "activity",
+                                _activity(
+                                    event_type=ActivityEventType(update.event_type),
+                                    request_id=request_id,
+                                    conversation_id=conversation_id,
+                                    status=ActivityStatus(update.status),
+                                    message=update.message,
+                                    agent=update.agent,
+                                    node=update.node,
+                                    metadata=update.metadata,
+                                ),
+                            )
+                        else:
+                            result = update
+                if result is None:
+                    raise RuntimeError("The agent graph stream completed without a result.")
+            else:
+                # Compatibility path for injected test doubles and external adapters.
+                transitions: asyncio.Queue[AgentTransition] = asyncio.Queue()
+                agent_task = asyncio.create_task(
+                    orchestrator.run(
+                        payload.message,
+                        context,
+                        transitions.put,
+                        conversation.summary,
+                        f"{context.identity.user_id}:{conversation_id}",
                     )
-                result = await agent_task
-        except BaseException:
-            if not agent_task.done():
-                agent_task.cancel()
-            await asyncio.gather(agent_task, return_exceptions=True)
-            raise
+                )
+                try:
+                    async with asyncio.timeout(settings.request_timeout_seconds):
+                        while not agent_task.done() or not transitions.empty():
+                            await _ensure_connected(request)
+                            try:
+                                transition = await asyncio.wait_for(
+                                    transitions.get(), timeout=0.05
+                                )
+                            except TimeoutError:
+                                continue
+                            yield _sse(
+                                "activity",
+                                _activity(
+                                    event_type=ActivityEventType(transition.event_type),
+                                    request_id=request_id,
+                                    conversation_id=conversation_id,
+                                    status=ActivityStatus(transition.status),
+                                    message=transition.message,
+                                    agent=transition.agent,
+                                    node=transition.node,
+                                    metadata=transition.metadata,
+                                ),
+                            )
+                        result = await agent_task
+                except BaseException:
+                    if not agent_task.done():
+                        agent_task.cancel()
+                    await asyncio.gather(agent_task, return_exceptions=True)
+                    raise
 
         yield _sse(
             "activity",

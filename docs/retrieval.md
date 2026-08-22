@@ -2,20 +2,22 @@
 
 ## Corpus
 
-The synthetic Commercial Bank corpus contains 36 Markdown documents:
+The synthetic Commercial Bank corpus contains 48 Markdown documents:
 
 | Category | Count |
 |---|---:|
-| policies | 6 |
-| architecture | 6 |
-| runbooks | 6 |
-| incidents | 10 |
-| product specifications | 4 |
-| meeting notes | 4 |
+| policies | 7 |
+| architecture | 8 |
+| runbooks | 8 |
+| incidents | 14 |
+| product specifications | 5 |
+| meeting notes | 6 |
 
 Documents deliberately cross-reference related architecture, runbooks, incidents, specifications,
-and reviews. The corpus includes confidential and restricted records for authorization tests and
-one incident containing a clearly identified prompt-injection artifact as untrusted evidence.
+and reviews. Twelve documents form a Project Orion continuity storyline in which early hypotheses
+are superseded, controls reported as complete later fail, and action status changes over time. The
+corpus also includes confidential and restricted records for authorization tests and one incident
+containing a clearly identified prompt-injection artifact as untrusted evidence.
 
 Each file has validated YAML frontmatter for fixture ID, title, document type, department, access
 level, and creation date. The parser rejects unsupported metadata, files outside the corpus root,
@@ -69,13 +71,13 @@ those fields are rejected before the retrieval handler runs.
 
 ## Evaluation baseline
 
-`data/retrieval_evaluation.json` freezes twelve questions covering policies, recurring payment
+`data/retrieval_evaluation.json` freezes sixteen questions covering policies, recurring payment
 failures, runbooks, restricted records, and malicious retrieved text. With the deterministic
 offline dense adapter and BM25 representation, the current baseline is:
 
 | Metric | Result | Target |
 |---|---:|---:|
-| Recall@5 | 93.75% | at least 80% |
+| Recall@5 | 95.00% | at least 80% |
 | valid evidence/chunk IDs | 100% | 100% |
 | unauthorized chunks | 0 | 0 |
 
@@ -83,3 +85,6 @@ The deterministic hashing encoder exists only for offline repeatability. Pinecon
 the configured OpenAI embedding adapter and should record a provider-specific evaluation before
 release.
 
+`data/hard_research_questions.json` adds eight multi-source synthesis challenges. These are not
+single-hit retrieval checks: they require reconciling dated claims, tracing control status, mapping
+requirements to evidence, or separating authorization recovery from settlement recovery.

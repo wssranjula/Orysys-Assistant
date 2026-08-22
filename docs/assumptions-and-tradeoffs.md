@@ -12,14 +12,14 @@
 
 ## Architecture trade-offs
 
-### Deterministic control versus model autonomy
+### Model routing with deterministic enforcement
 
-The API uses deterministic intent routing and typed specialists for reproducibility, security, and
-offline assessment. A provider-backed Deep Agents factory is included and compiles with the same
-restricted tool surfaces, but the default request path does not require or invoke a hosted chat
-model. This makes every golden failure reproducible and keeps identity, authorization, scope,
-budgets, and validation out of model prompts. A production version would insert model synthesis
-behind these existing boundaries and evaluate model-specific groundedness.
+The API uses a model-backed LangChain supervisor with retry-capable tool-structured output for
+semantic routing. The supervisor may choose only one declared route; LangGraph edges, tool surfaces,
+identity, authorization, scope, budgets, citation resolution, and validation remain deterministic
+code. A missing or failed routing model fails the request rather than falling back to keyword
+matching. Tests inject router doubles so offline verification remains reproducible without changing
+the production routing policy.
 
 ### Simplified RLM
 

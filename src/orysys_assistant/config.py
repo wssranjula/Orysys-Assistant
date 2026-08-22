@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_project: str = "commercial-bank-assistant"
     openai_api_key: str | None = None
+    agent_model: str = "gpt-5-mini"
+    agent_synthesis_enabled: bool = True
     embedding_provider: str = "openai"
 
     mock_token_delay_seconds: float = Field(default=0.025, ge=0, le=2)
