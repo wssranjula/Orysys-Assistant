@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from orysys_assistant.agent.models import GroundedAnswerDraft
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.agent.research_graph import ResearchLimits
+from orysys_assistant.agent.research_planner import build_todo_research_planner
 from orysys_assistant.agent.router import AgentRouter, LLMIntentRouter, RouteDecision
 from orysys_assistant.agent.subagents import (
     AnalysisSubagent,
@@ -34,11 +35,6 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
     gateway = dependencies.gateway
     settings = dependencies.settings or Settings.model_construct()
     direct = ScopedToolbox(gateway, frozenset({"knowledge_search"}))
-    research = ResearchSubagent(
-        ScopedToolbox(gateway, frozenset({"knowledge_search"})),
-        ResearchLimits.from_settings(settings),
-        None,
-    )
     analysis = AnalysisSubagent(
         ScopedToolbox(gateway, frozenset({"knowledge_search", "structured_analysis"}))
     )
@@ -102,6 +98,13 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
                 name="supervisor-router",
             )
         )
+
+    research = ResearchSubagent(
+        ScopedToolbox(gateway, frozenset({"knowledge_search"})),
+        ResearchLimits.from_settings(settings),
+        dependencies.checkpointer,
+        build_todo_research_planner(model) if model is not None else None,
+    )
 
     synthesizer = None
     if settings.agent_synthesis_enabled and settings.openai_api_key:

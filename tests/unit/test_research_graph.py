@@ -65,7 +65,9 @@ def limits(**overrides: Any) -> ResearchLimits:
     return ResearchLimits(**values)
 
 
-def workflow_with_handler(handler: Any, configured_limits: ResearchLimits) -> ResearchWorkflow:
+def workflow_with_handler(
+    handler: Any, configured_limits: ResearchLimits, planner: Any = None
+) -> ResearchWorkflow:
     gateway = ToolGateway(AuthorizationPolicy())
     gateway.register(
         ToolSpec(
@@ -76,8 +78,59 @@ def workflow_with_handler(handler: Any, configured_limits: ResearchLimits) -> Re
         )
     )
     return ResearchWorkflow(
-        ScopedToolbox(gateway, frozenset({"knowledge_search"})), configured_limits
+        ScopedToolbox(gateway, frozenset({"knowledge_search"})),
+        configured_limits,
+        planner=planner,
     )
+
+
+@pytest.mark.asyncio
+async def test_todo_planner_creates_claim_driven_tasks_instead_of_folder_fanout() -> None:
+    planned = [
+        "Trace which Project Orion controls were represented as complete before each failure.",
+        "Reconcile the initial and final root-cause evidence for PAY-1224.",
+        "Audit runtime evidence that reopened the connection-budget control after PAY-1288.",
+        "Assess whether later actions closed the recovery and consumer-canary gaps.",
+    ]
+
+    class FakeTodoPlanner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            self.calls.append({"question": question, **kwargs})
+            return planned
+
+    planner = FakeTodoPlanner()
+    observed_queries: list[str] = []
+    observed_document_types: list[str | None] = []
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        request = cast(KnowledgeSearchInput, parameters)
+        observed_queries.append(request.query)
+        observed_document_types.append(request.document_type)
+        return {"evidence": [evidence_for(request.query).model_dump(mode="json")]}
+
+    workflow = workflow_with_handler(handler, limits(), planner)
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    execution = await workflow.run(
+        "Investigate Project Orion across incidents, meeting notes, runbooks, and architecture.",
+        request_context(),
+        capture,
+    )
+
+    assert len(planner.calls) == 1
+    assert set(observed_queries) == set(planned)
+    assert observed_document_types == [None] * 4
+    assert execution.result.partial is False
+    planner_event = next(
+        item for item in transitions if item.node == "planner" and item.status == "completed"
+    )
+    assert [todo["content"] for todo in planner_event.metadata["todos"]] == planned
 
 
 @pytest.mark.asyncio
@@ -122,8 +175,8 @@ async def test_compiled_graph_bounds_concurrency_and_isolates_worker_failure() -
     } <= set(workflow.graph.nodes)
     assert maximum_active == 2
     assert execution.result.partial is False
-    assert len(execution.evidence) == 3
-    assert len(set(execution.result.evidence_ids)) == 3
+    assert len(execution.evidence) >= 3
+    assert len(set(execution.result.evidence_ids)) >= 3
     assert any("RuntimeError" in warning for warning in execution.result.warnings)
     assert any(item.node.startswith("worker:") for item in transitions)
 

@@ -25,9 +25,10 @@ the production routing policy.
 
 The research specialist implements Recursive Language Model concepts as an explicit LangGraph:
 plan, bounded parallel workers, targeted retrieval, reduction, coverage checking, limited follow-up
-recursion, and final aggregation. Plans and analysis operations are code-generated rather than
-arbitrary model-generated Python. This gives the evaluator the recursion and state-management
-behavior without introducing a code-execution surface.
+recursion, and final aggregation. A model generates bounded research todos through the harness
+`write_todos` middleware, while code still owns task limits and execution. Analysis operations are
+code-generated rather than arbitrary model-generated Python. This gives the evaluator adaptive
+planning, recursion, and state management without introducing a code-execution surface.
 
 ### Offline retrieval versus Pinecone
 

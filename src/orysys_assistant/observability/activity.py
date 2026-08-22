@@ -26,6 +26,10 @@ SAFE_ACTIVITY_METADATA_KEYS = frozenset(
         "status",
         "sufficient",
         "task_count",
+        "todo_content",
+        "todo_id",
+        "todo_status",
+        "todos",
         "tool_name",
     }
 )
@@ -40,7 +44,21 @@ def sanitize_activity_metadata(metadata: dict[str, Any] | None) -> dict[str, Any
     for key, value in (metadata or {}).items():
         if key not in SAFE_ACTIVITY_METADATA_KEYS:
             continue
-        if key == "retrieval_filters":
+        if key == "todos":
+            if not isinstance(value, list):
+                continue
+            sanitized[key] = [
+                {
+                    "id": str(item.get("id", ""))[:80],
+                    "content": str(item.get("content", ""))[:300],
+                    "status": str(item.get("status", "pending"))
+                    if item.get("status") in {"pending", "in_progress", "completed"}
+                    else "pending",
+                }
+                for item in value[:6]
+                if isinstance(item, dict) and item.get("content")
+            ]
+        elif key == "retrieval_filters":
             if not isinstance(value, dict):
                 continue
             sanitized[key] = {
@@ -69,6 +87,7 @@ class ActivityPanelState:
     memory_status: str = "pending"
     validation_status: str = "pending"
     degraded: bool = False
+    research_todos: list[dict[str, str]] = field(default_factory=list)
 
 
 def project_activity_panel(events: list[dict[str, Any]]) -> ActivityPanelState:
@@ -83,6 +102,30 @@ def project_activity_panel(events: list[dict[str, Any]]) -> ActivityPanelState:
             state.current_node = str(event["node"])
         if metadata.get("plan_summary"):
             state.plan_summary = str(metadata["plan_summary"])
+        if isinstance(metadata.get("todos"), list):
+            known_todos = {todo.get("id"): todo for todo in state.research_todos}
+            for todo in metadata["todos"]:
+                existing = known_todos.get(todo.get("id"))
+                if existing is None:
+                    state.research_todos.append(todo)
+                else:
+                    existing.update(todo)
+        todo_id = metadata.get("todo_id")
+        if isinstance(todo_id, str) and todo_id:
+            updated = False
+            for todo in state.research_todos:
+                if todo.get("id") == todo_id:
+                    todo["status"] = str(metadata.get("todo_status", todo["status"]))
+                    updated = True
+                    break
+            if not updated and metadata.get("todo_content"):
+                state.research_todos.append(
+                    {
+                        "id": todo_id,
+                        "content": str(metadata["todo_content"]),
+                        "status": str(metadata.get("todo_status", "pending")),
+                    }
+                )
         if metadata.get("tool_name"):
             state.tool_name = str(metadata["tool_name"])
         elif event.get("event_type") in {"tool_started", "tool_completed", "tool_denied"}:

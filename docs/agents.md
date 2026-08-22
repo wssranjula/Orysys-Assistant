@@ -37,7 +37,10 @@ read-only MCP operations.
 
 The Research specialist owns the compiled, recursive, budgeted Phase 5 LangGraph described in
 [research-graph.md](research-graph.md). The root still delegates through the same small static agent
-surface; recursion occurs only inside that code-controlled specialist workflow.
+surface; recursion occurs only inside that code-controlled specialist workflow. Its planning node
+explicitly attaches the harness `TodoListMiddleware` to a planner whose sole tool is `write_todos`.
+The generated todos become bounded `ResearchTask` records; they cannot add tools, filters, budgets,
+or permissions.
 
 ## Production graph and synthesis
 

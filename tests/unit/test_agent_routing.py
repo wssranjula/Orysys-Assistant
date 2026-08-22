@@ -167,6 +167,7 @@ def test_production_supervisor_uses_retryable_route_only_tool_strategy(
 
     monkeypatch.setattr(agent_factory, "ChatOpenAI", lambda **_: object())
     monkeypatch.setattr(agent_factory, "create_agent", fake_create_agent)
+    monkeypatch.setattr(agent_factory, "build_todo_research_planner", lambda _: object())
 
     build_root_orchestrator(
         AgentDependencies(

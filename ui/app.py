@@ -48,6 +48,15 @@ def render_activity(events: list[dict[str, Any]], placeholder: Any) -> None:
         node_column.caption("Graph node")
         node_column.markdown(f"**`{panel.current_node}`**")
         st.info(panel.plan_summary)
+        if panel.research_todos:
+            st.markdown("##### Research tasks")
+            for todo in panel.research_todos:
+                marker = {
+                    "completed": "✅",
+                    "in_progress": "🔄",
+                    "pending": "⬜",
+                }.get(todo.get("status", "pending"), "⬜")
+                st.markdown(f"{marker} {todo.get('content', '')}")
 
         tool_column, retrieval_column = st.columns(2)
         tool_column.caption("Active tool")

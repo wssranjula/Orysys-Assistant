@@ -233,7 +233,8 @@ There is no second, unused agent harness. See [docs/agents.md](docs/agents.md).
 ### Phase 5 bounded research workflow
 
 Complex research requests now enter a compiled LangGraph subgraph. It normalizes trusted scope,
-creates up to four independent tasks, fans workers out with LangGraph `Send` through the Tool Gateway,
+uses the harness `write_todos` middleware to create up to four claim-driven tasks, fans workers out
+with LangGraph `Send` through the Tool Gateway,
 deduplicates evidence and claims, checks coverage, and performs at most two bounded follow-up rounds.
 Code-enforced limits cover parallel workers, recursion depth, total tool calls, evidence per worker,
 worker deadlines, and the overall deadline.

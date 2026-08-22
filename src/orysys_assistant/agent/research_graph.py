@@ -3,7 +3,7 @@
 import asyncio
 import operator
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
@@ -25,6 +25,7 @@ from orysys_assistant.agent.models import (
     ResearchTask,
     ResearchTaskResult,
 )
+from orysys_assistant.agent.research_planner import ResearchPlanner
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.guardrails.content import unwrap_evidence
@@ -94,10 +95,12 @@ class ResearchWorkflow:
         toolbox: ScopedToolbox,
         limits: ResearchLimits,
         checkpointer: Any = None,
+        planner: ResearchPlanner | None = None,
     ) -> None:
         self._toolbox = toolbox
         self._limits = limits
         self._checkpointer = checkpointer
+        self._planner_agent = planner
         self.graph = self._compile()
 
     def _compile(self) -> Any:
@@ -208,14 +211,41 @@ class ResearchWorkflow:
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
     ) -> dict[str, Any]:
         await self._node_event(runtime, "planner", "started")
-        tasks = self._initial_tasks(state["query"], state["filters"])
+        warnings = list(state["warnings"])
+        if self._planner_agent is None:
+            tasks = self._initial_tasks(state["query"], state["filters"])
+        else:
+            try:
+                tasks = await self._planned_tasks(
+                    state["query"],
+                    SearchFilters(),
+                    max_tasks=self._limits.max_initial_tasks,
+                )
+            except Exception as exc:
+                tasks = self._initial_tasks(state["query"], state["filters"])
+                warnings.append(
+                    f"Model-generated planning was unavailable; used bounded fallback: "
+                    f"{type(exc).__name__}."
+                )
         plan = ResearchPlan(
             objective=state["query"],
             tasks=tasks[: self._limits.max_initial_tasks],
             aggregation_method="deduplicate evidence and aggregate recurring supported claims",
         )
-        await self._node_event(runtime, "planner", "completed", {"task_count": len(plan.tasks)})
-        return {"plan": plan, "pending_tasks": plan.tasks}
+        await self._node_event(
+            runtime,
+            "planner",
+            "completed",
+            {
+                "task_count": len(plan.tasks),
+                "plan_summary": self._plan_summary(plan.tasks),
+                "todos": [
+                    {"id": task.task_id, "content": task.question, "status": "pending"}
+                    for task in plan.tasks
+                ],
+            },
+        )
+        return {"plan": plan, "pending_tasks": plan.tasks, "warnings": warnings}
 
     async def _workers(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
@@ -259,7 +289,17 @@ class ResearchWorkflow:
         task: ResearchTask,
         runtime: Runtime[ResearchGraphContext],
     ) -> ResearchTaskResult:
-        await self._node_event(runtime, f"worker:{task.task_id}", "started")
+        await self._node_event(
+            runtime,
+            f"worker:{task.task_id}",
+            "started",
+            {
+                "todo_id": task.task_id,
+                "todo_content": task.question,
+                "todo_status": "in_progress",
+            },
+            message=f"Researching: {task.question[:240]}",
+        )
         worker_metadata: dict[str, Any] = {}
         parameters: dict[str, Any] = {
             "query": task.question,
@@ -309,8 +349,14 @@ class ResearchWorkflow:
             {
                 "status": result.status,
                 "evidence_count": len(result.evidence),
+                "todo_id": task.task_id,
+                "todo_content": task.question,
+                "todo_status": (
+                    "completed" if result.status == "completed" and result.evidence else "pending"
+                ),
                 **worker_metadata,
             },
+            message=f"Research task {result.status}: {task.question[:220]}",
         )
         return result
 
@@ -364,7 +410,8 @@ class ResearchWorkflow:
     ) -> dict[str, Any]:
         await self._node_event(runtime, "coverage_check", "started")
         completed = [item for item in state["completed_tasks"] if item.status == "completed"]
-        sufficient = len(state["evidence"]) >= 3 and len(completed) >= 2
+        planned_task_count = len(state["plan"].tasks) if state["plan"] else 2
+        sufficient = len(state["evidence"]) >= 3 and len(completed) >= planned_task_count
         budget_exhausted = state["tool_calls_used"] >= self._limits.max_total_tool_calls
         depth_exhausted = state["recursion_depth"] >= self._limits.max_recursion_depth
         partial = not sufficient and (budget_exhausted or depth_exhausted)
@@ -397,19 +444,45 @@ class ResearchWorkflow:
     ) -> dict[str, Any]:
         await self._node_event(runtime, "followup_planner", "started")
         depth = state["recursion_depth"] + 1
-        tasks = [
-            ResearchTask(
-                task_id=f"followup-{depth}-{index}",
-                question=f"{state['query']} Cross-check {focus} evidence and missing context.",
-                filters=SearchFilters(document_type=document_type),
-                expected_output=f"Corroborating {focus} evidence",
-            )
-            for index, (focus, document_type) in enumerate(
-                (("runbook", "runbook"), ("architecture", "architecture")), start=1
-            )
-        ][: self._limits.max_followup_tasks]
-        await self._node_event(runtime, "followup_planner", "completed", {"task_count": len(tasks)})
-        return {"pending_tasks": tasks, "recursion_depth": depth}
+        warnings = list(state["warnings"])
+        if self._planner_agent is None:
+            tasks = self._fallback_followup_tasks(state["query"], depth)
+        else:
+            try:
+                tasks = await self._planned_tasks(
+                    state["query"],
+                    SearchFilters(),
+                    max_tasks=self._limits.max_followup_tasks,
+                    prefix=f"followup-{depth}",
+                    completed_tasks=[task.question for task in state["plan"].tasks]
+                    if state["plan"]
+                    else (),
+                    evidence_titles=[item.title for item in state["evidence"].values()],
+                )
+            except Exception as exc:
+                tasks = self._fallback_followup_tasks(state["query"], depth)
+                warnings.append(
+                    f"Model-generated follow-up planning was unavailable; used bounded fallback: "
+                    f"{type(exc).__name__}."
+                )
+        await self._node_event(
+            runtime,
+            "followup_planner",
+            "completed",
+            {
+                "task_count": len(tasks),
+                "plan_summary": self._plan_summary(tasks),
+                "todos": [
+                    {"id": task.task_id, "content": task.question, "status": "pending"}
+                    for task in tasks
+                ],
+            },
+        )
+        return {
+            "pending_tasks": tasks,
+            "recursion_depth": depth,
+            "warnings": warnings,
+        }
 
     async def _finalize(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
@@ -454,6 +527,53 @@ class ResearchWorkflow:
             )
             for index, document_type in enumerate(task_types, start=1)
         ]
+
+    async def _planned_tasks(
+        self,
+        query: str,
+        filters: SearchFilters,
+        *,
+        max_tasks: int,
+        prefix: str = "initial",
+        completed_tasks: Sequence[str] = (),
+        evidence_titles: Sequence[str] = (),
+    ) -> list[ResearchTask]:
+        if self._planner_agent is None:
+            raise RuntimeError("No model-generated research planner is configured.")
+        questions = await self._planner_agent.plan(
+            query,
+            max_tasks=max_tasks,
+            completed_tasks=completed_tasks,
+            evidence_titles=evidence_titles,
+        )
+        return [
+            ResearchTask(
+                task_id=f"{prefix}-{index}",
+                question=question,
+                filters=filters,
+                expected_output="Evidence that resolves this planned research todo",
+            )
+            for index, question in enumerate(questions[:max_tasks], start=1)
+        ]
+
+    def _fallback_followup_tasks(self, query: str, depth: int) -> list[ResearchTask]:
+        return [
+            ResearchTask(
+                task_id=f"followup-{depth}-{index}",
+                question=f"{query} Cross-check {focus} evidence and missing context.",
+                filters=SearchFilters(document_type=document_type),
+                expected_output=f"Corroborating {focus} evidence",
+            )
+            for index, (focus, document_type) in enumerate(
+                (("runbook", "runbook"), ("architecture", "architecture")), start=1
+            )
+        ][: self._limits.max_followup_tasks]
+
+    @staticmethod
+    def _plan_summary(tasks: Sequence[ResearchTask]) -> str:
+        return "Research todos: " + "; ".join(
+            f"{index}. {task.question}" for index, task in enumerate(tasks, start=1)
+        )
 
     @staticmethod
     def _query_filters(query: str) -> SearchFilters:
@@ -519,13 +639,14 @@ class ResearchWorkflow:
         node: str,
         status: str,
         metadata: dict[str, Any] | None = None,
+        message: str | None = None,
     ) -> None:
         transition = AgentTransition(
             event_type=f"research_node_{status}",
             agent="research_subagent",
             node=node,
             status=status,
-            message=f"Research node {node.replace('_', ' ')} {status}.",
+            message=message or f"Research node {node.replace('_', ' ')} {status}.",
             metadata=metadata or {},
         )
         with suppress(RuntimeError):
