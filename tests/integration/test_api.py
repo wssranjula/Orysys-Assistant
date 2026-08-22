@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -7,6 +8,7 @@ import httpx
 import pytest
 
 from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
+from orysys_assistant.api.routes import chat as chat_routes
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.models import Citation
 from orysys_assistant.main import create_app
@@ -205,6 +207,50 @@ async def test_chat_stream_separates_activity_tokens_and_final(client: httpx.Asy
     assert final["status"] == "complete"
     assert final["request_id"] == response.headers["X-Request-ID"]
     assert final["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_uses_explicit_langsmith_configuration(
+    client: httpx.AsyncClient,
+    app: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = app.state.settings
+    settings.langsmith_tracing = True
+    settings.langsmith_api_key = "test-langsmith-key"
+    settings.langsmith_endpoint = "https://langsmith.test"
+    settings.langsmith_project = "test-project"
+    fake_client = object()
+    client_arguments: dict[str, str] = {}
+    tracing_arguments: dict[str, Any] = {}
+
+    def fake_client_factory(api_key: str, api_url: str) -> object:
+        client_arguments.update(api_key=api_key, api_url=api_url)
+        return fake_client
+
+    @contextmanager
+    def fake_tracing_context(**kwargs: Any) -> Iterator[None]:
+        tracing_arguments.update(kwargs)
+        yield
+
+    monkeypatch.setattr(chat_routes, "get_langsmith_client", fake_client_factory)
+    monkeypatch.setattr(chat_routes, "tracing_context", fake_tracing_context)
+
+    response = await client.post(
+        "/v1/chat/stream",
+        json={"message": "Show me the leave policy"},
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert client_arguments == {
+        "api_key": "test-langsmith-key",
+        "api_url": "https://langsmith.test",
+    }
+    assert tracing_arguments["enabled"] is True
+    assert tracing_arguments["client"] is fake_client
+    assert tracing_arguments["project_name"] == "test-project"
+    assert tracing_arguments["metadata"]["agent_name"] == "test_root_agent"
 
 
 @pytest.mark.asyncio

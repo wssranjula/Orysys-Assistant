@@ -69,6 +69,7 @@ class Settings(BaseSettings):
 
     langsmith_tracing: bool = False
     langsmith_api_key: str | None = None
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_project: str = "commercial-bank-assistant"
     openai_api_key: str | None = None
     embedding_provider: str = "openai"

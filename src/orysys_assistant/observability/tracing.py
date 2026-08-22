@@ -17,8 +17,10 @@ async def build_mock_answer(message: str) -> str:
 
 
 @lru_cache(maxsize=4)
-def _client(api_key: str) -> Client:
-    return Client(api_key=api_key)
+def get_langsmith_client(api_key: str, api_url: str) -> Client:
+    """Return a shared client configured independently of process environment variables."""
+
+    return Client(api_key=api_key, api_url=api_url)
 
 
 async def run_traced_mock_agent(
@@ -32,7 +34,11 @@ async def run_traced_mock_agent(
     """Trace when fully configured and otherwise execute without a network side effect."""
 
     tracing_enabled = enabled and bool(api_key)
-    client = _client(api_key) if tracing_enabled and api_key else None
+    client = (
+        get_langsmith_client(api_key, "https://api.smith.langchain.com")
+        if tracing_enabled and api_key
+        else None
+    )
     with tracing_context(
         enabled=tracing_enabled,
         client=client,

@@ -44,6 +44,7 @@ from orysys_assistant.memory.models import ConversationRecord
 from orysys_assistant.memory.repository import ConversationRepository
 from orysys_assistant.observability.activity import sanitize_activity_metadata
 from orysys_assistant.observability.logging import get_logger
+from orysys_assistant.observability.tracing import get_langsmith_client
 from orysys_assistant.security.models import TrustedRequestContext
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
@@ -165,7 +166,15 @@ async def stream_chat_events(
             ),
         )
         transitions: asyncio.Queue[AgentTransition] = asyncio.Queue()
+        langsmith_client = (
+            get_langsmith_client(settings.langsmith_api_key, settings.langsmith_endpoint)
+            if settings.langsmith_enabled and settings.langsmith_api_key
+            else None
+        )
         with tracing_context(
+            enabled=settings.langsmith_enabled,
+            client=langsmith_client,
+            project_name=settings.langsmith_project,
             metadata={
                 "request_id": str(request_id),
                 "conversation_id": str(conversation_id),
