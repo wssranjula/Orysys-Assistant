@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
@@ -59,6 +59,14 @@ class ChatRequest(StrictModel):
     message: str = Field(min_length=1, max_length=8_000)
     conversation_id: UUID | None = None
 
+    @field_validator("message")
+    @classmethod
+    def message_must_contain_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("message must contain non-whitespace text")
+        return value
+
 
 class Citation(StrictModel):
     citation_id: str = Field(min_length=1, max_length=20)
@@ -108,3 +116,26 @@ class ApiError(StrictModel):
 
 class ErrorEnvelope(StrictModel):
     error: ApiError
+
+
+class ConversationSnapshot(StrictModel):
+    conversation_id: UUID
+    messages: list[dict[str, str]] = Field(default_factory=list)
+    persistence: str = "not_available_in_phase_1"
+
+
+class FeedbackRequest(StrictModel):
+    conversation_id: UUID
+    response_id: UUID
+    rating: int = Field(ge=-1, le=1)
+    comment: str | None = Field(default=None, max_length=1_000)
+
+
+class FeedbackAcknowledgement(StrictModel):
+    accepted: bool
+    persistence: str = "not_available_in_phase_1"
+
+
+class HealthResponse(StrictModel):
+    status: str
+    components: dict[str, str] = Field(default_factory=dict)

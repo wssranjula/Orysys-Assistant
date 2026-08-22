@@ -1,41 +1,65 @@
-"""Stable application error taxonomy; HTTP mapping belongs to the API layer."""
+"""Stable application error taxonomy and safe public attributes."""
+
+from typing import Any
 
 
 class ApplicationError(Exception):
     """Base class for expected, safely reportable application failures."""
 
+    code = "application_error"
+    status_code = 500
+    retryable = False
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.details = details or {}
+
 
 class InvalidRequestError(ApplicationError):
-    pass
+    code = "invalid_request"
+    status_code = 400
 
 
 class AuthenticationError(ApplicationError):
-    pass
+    code = "authentication_failed"
+    status_code = 401
 
 
 class AuthorizationError(ApplicationError):
-    pass
+    code = "authorization_denied"
+    status_code = 403
 
 
 class RateLimitError(ApplicationError):
-    pass
+    code = "rate_limit_exceeded"
+    status_code = 429
+    retryable = True
 
 
 class RetrievalUnavailableError(ApplicationError):
-    pass
+    code = "retrieval_unavailable"
+    status_code = 503
+    retryable = True
 
 
 class ModelUnavailableError(ApplicationError):
-    pass
+    code = "model_unavailable"
+    status_code = 503
+    retryable = True
 
 
 class ToolTimeoutError(ApplicationError):
-    pass
+    code = "execution_timeout"
+    status_code = 504
+    retryable = True
 
 
 class CitationValidationError(ApplicationError):
-    pass
+    code = "citation_validation_failed"
+    status_code = 422
 
 
 class InsufficientEvidenceError(ApplicationError):
-    pass
+    code = "insufficient_evidence"
+    status_code = 422
