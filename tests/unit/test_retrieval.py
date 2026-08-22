@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from orysys_assistant.config import Settings
-from orysys_assistant.domain.errors import InvalidRequestError
+from orysys_assistant.domain.errors import InvalidRequestError, RetrievalUnavailableError
 from orysys_assistant.domain.models import Role
 from orysys_assistant.retrieval.chunking import SectionAwareChunker
 from orysys_assistant.retrieval.embeddings import DeterministicHashEmbedding
@@ -201,6 +201,28 @@ async def test_filters_narrow_scope_and_never_broaden_it(tmp_path: Path) -> None
     assert all(item.metadata["document_type"] == "incident" for item in incidents)
     assert all(item.metadata["created_date"] >= "2025-05-01" for item in incidents)
     assert forbidden_department == []
+
+
+@pytest.mark.asyncio
+async def test_sparse_failure_uses_dense_only_but_dense_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retrieval, store = await build_retrieval(tmp_path)
+    scope = AccessScopeService(Settings(_env_file=None)).build(user(Role.VIEWER, "retail-banking"))
+
+    async def unavailable(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("injected dependency failure")
+
+    monkeypatch.setattr(store, "query_sparse", unavailable)
+    dense_only = await retrieval.search("remote work policy", scope, top_k=3)
+
+    assert dense_only
+    assert all(item.metadata["retrieval_mode"] == "dense_only" for item in dense_only)
+    assert all(item.metadata["retrieval_degraded"] is True for item in dense_only)
+
+    monkeypatch.setattr(store, "query_dense", unavailable)
+    with pytest.raises(RetrievalUnavailableError):
+        await retrieval.search("remote work policy", scope, top_k=3)
 
 
 @pytest.mark.asyncio

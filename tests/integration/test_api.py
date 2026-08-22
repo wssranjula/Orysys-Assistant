@@ -8,7 +8,9 @@ import pytest
 
 from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute
 from orysys_assistant.config import Settings
+from orysys_assistant.domain.models import Citation
 from orysys_assistant.main import create_app
+from orysys_assistant.retrieval.models import Evidence
 
 TOKENS = {
     "viewer": "phase2-viewer-demo-token",
@@ -36,10 +38,34 @@ class FakeOrchestrator:
         self.calls += 1
         self.summaries.append(conversation_summary)
         self.thread_ids.append(thread_id)
+        evidence = Evidence(
+            evidence_id="ev_test_policy",
+            document_id="policy-test-001",
+            chunk_id="policy-test-001:purpose:0000",
+            title="Test Policy",
+            content="Fixture evidence for the integration test.",
+            metadata={
+                "access_level": "internal",
+                "source_path": "fixtures/policy-test-001.md",
+            },
+            final_score=1.0,
+        )
         return AgentExecutionResult(
             route=AgentRoute.DIRECT_KNOWLEDGE,
-            answer=f"Grounded test answer for: {message}",
+            answer=f"Grounded test answer for: {message} [1]",
+            citations=[
+                Citation(
+                    citation_id="1",
+                    evidence_id=evidence.evidence_id,
+                    document_id=evidence.document_id,
+                    title=evidence.title,
+                    chunk_id=evidence.chunk_id,
+                    source_path=str(evidence.metadata["source_path"]),
+                )
+            ],
             warnings=["Test runtime uses fixture evidence."],
+            evidence_ids=[evidence.evidence_id],
+            evidence=[evidence],
         )
 
 
@@ -271,3 +297,41 @@ async def test_rate_limit_returns_429_and_retry_after() -> None:
     assert int(second.headers["Retry-After"]) > 0
     assert second.json()["error"]["code"] == "rate_limit_exceeded"
     assert runtime.orchestrator.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fabricated_citation_is_not_streamed_or_persisted(
+    client: httpx.AsyncClient, app: Any
+) -> None:
+    class FabricatedCitationOrchestrator(FakeOrchestrator):
+        async def run(self, *args: Any, **kwargs: Any) -> AgentExecutionResult:
+            result = await super().run(*args, **kwargs)
+            fabricated = result.citations[0].model_copy(
+                update={"evidence_id": "ev_not_in_request_ledger"}
+            )
+            return result.model_copy(
+                update={
+                    "answer": "A fabricated policy statement. [1]",
+                    "citations": [fabricated],
+                }
+            )
+
+    app.state.agent_runtime.orchestrator = FabricatedCitationOrchestrator()
+    response = await client.post(
+        "/v1/chat/stream",
+        json={"message": "Explain the leave policy"},
+        headers=auth_headers(),
+    )
+    events = parse_sse(response.text)
+    final = events[-1][1]
+    activity = [event for name, event in events if name == "activity"]
+
+    assert final["status"] == "insufficient_evidence"
+    assert final["citations"] == []
+    assert "fabricated policy" not in final["answer"].lower()
+    assert any(event["event_type"] == "validation_failed" for event in activity)
+
+    snapshot = await client.get(
+        f"/v1/conversations/{final['conversation_id']}", headers=auth_headers()
+    )
+    assert "fabricated policy" not in json.dumps(snapshot.json()).lower()
