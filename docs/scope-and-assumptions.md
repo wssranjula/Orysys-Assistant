@@ -32,7 +32,8 @@ never submit or override `user_id`, `role`, `namespace`, departments, or access 
 
 ## Documents and access
 
-Supported types are `policy`, `architecture`, `runbook`, and `incident`. Every indexed chunk
+Supported types are `policy`, `architecture`, `runbook`, `incident`, `product_specification`,
+and `meeting_note`. Every indexed chunk
 must carry `organization`, `document_id`, `title`, `document_type`, `department`,
 `access_level`, `created_date`, and `source_path` metadata.
 
@@ -85,4 +86,3 @@ The POC is successful when the ten golden scenarios pass, activity is observable
 revealing hidden reasoning, citations resolve to authorized evidence, and dependency failures
 produce the documented safe or degraded result. Quality beyond that baseline is measured but
 does not expand scope during implementation.
-

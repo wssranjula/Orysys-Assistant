@@ -5,9 +5,9 @@ knowledge. The target system combines a FastAPI/Streamlit interface, a controlle
 harness, a bounded LangGraph research workflow, hybrid Pinecone retrieval, role-aware tools,
 session memory, and LangSmith observability.
 
-> Current status: **Phase 2 complete — authenticated, role-scoped walking skeleton with shared
-> rate limiting.** The agent remains a deterministic mock until retrieval and orchestration are
-> introduced in later phases.
+> Current status: **Phase 3 complete — authenticated walking skeleton plus a tested hybrid
+> evidence layer.** The chat agent remains a deterministic mock until orchestration is introduced
+> in Phase 4.
 
 ## POC scope
 
@@ -140,12 +140,39 @@ Tracing is disabled safely when no key/configuration is supplied.
 - Authentication and rate-limit denials happen before the mock agent and return consistent
   `401`, `403`, or `429` envelopes.
 
+### Phase 3 corpus and retrieval
+
+The repository contains 36 deterministic fictional documents across policies, architecture,
+runbooks, incidents, product specifications, and meeting notes. Generate or verify them with:
+
+```bash
+uv run python scripts/generate_sample_documents.py
+uv run python scripts/ingest_sample_documents.py --backend memory
+```
+
+The memory command executes parsing, section-aware chunking, deterministic IDs, dense encoding,
+BM25 sparse encoding, idempotent upsert, stale-vector cleanup, and manifest generation without
+external credentials. It is the test/evaluation adapter, not the deployment vector database.
+
+To ingest into an existing Pinecone dense index, configure `PINECONE_API_KEY`,
+`PINECONE_INDEX` (or preferably `PINECONE_HOST`), `OPENAI_API_KEY`, the embedding model and
+dimension, then run:
+
+```bash
+uv run python scripts/ingest_sample_documents.py --backend pinecone
+```
+
+The Pinecone index dimension must match `EMBEDDING_DIMENSION`. Retrieval executes dense and sparse
+queries asynchronously inside the trusted organization namespace, fuses normalized scores using
+the configured 0.65/0.35 weights, and returns attributed evidence. See
+[docs/retrieval.md](docs/retrieval.md).
+
 ## Delivery roadmap
 
 1. Phase 0 — complete: scope, contracts, architecture, dependencies, and golden scenarios
 2. Phase 1 — complete: FastAPI/Streamlit streaming walking skeleton
 3. Phase 2 — complete: authentication, authorization, tool gateway, and Redis rate limiting
-4. Phase 3 — sample corpus, ingestion, and hybrid Pinecone retrieval
+4. Phase 3 — complete: sample corpus, ingestion, and hybrid Pinecone retrieval
 5. Phase 4 — root Deep Agent and specialized agents
 6. Phase 5 — bounded recursive LangGraph research workflow
 7. Phase 6+ — memory, MCP/analysis tools, hardening, observability, and deployment
