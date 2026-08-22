@@ -68,7 +68,7 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
         ) as response,
     ):
         if response.is_error:
-            body = response.read().json()
+            body = json.loads(response.read())
             raise RuntimeError(body.get("error", {}).get("message", "API request failed"))
 
         for event_name, event in iter_sse(response):
