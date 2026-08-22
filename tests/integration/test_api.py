@@ -7,7 +7,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
+from orysys_assistant.agent.models import (
+    AgentExecutionResult,
+    AgentRoute,
+    AgentTransition,
+    AnswerToken,
+)
 from orysys_assistant.agent.router import RouteDecision
 from orysys_assistant.api.routes import chat as chat_routes
 from orysys_assistant.config import Settings
@@ -222,6 +227,73 @@ async def test_chat_stream_separates_activity_tokens_and_final(client: httpx.Asy
     assert final["status"] == "complete"
     assert final["request_id"] == response.headers["X-Request-ID"]
     assert final["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_forwards_generated_tokens_without_replaying_them(
+    app: Any, client: httpx.AsyncClient
+) -> None:
+    class StreamingOrchestrator:
+        name = "streaming_root_agent"
+
+        async def stream(self, message: str, *args: Any, **kwargs: Any) -> Any:
+            for piece in ("Remote work ", "is permitted [1]."):
+                yield AnswerToken(text=piece)
+            yield AgentExecutionResult(
+                route=AgentRoute.DIRECT_KNOWLEDGE,
+                answer="Remote work is permitted [1].",
+                citations=[
+                    Citation(
+                        citation_id="1",
+                        evidence_id="ev_stream",
+                        document_id="policy-stream-001",
+                        chunk_id="policy-stream-001:purpose:0000",
+                        title="Remote Work Policy",
+                        source_path="policies/policy-stream-001.md",
+                    )
+                ],
+                evidence_ids=["ev_stream"],
+                evidence=[
+                    Evidence(
+                        evidence_id="ev_stream",
+                        document_id="policy-stream-001",
+                        chunk_id="policy-stream-001:purpose:0000",
+                        title="Remote Work Policy",
+                        content="Remote work is permitted for approved roles.",
+                        metadata={
+                            "access_level": "internal",
+                            "source_path": "policies/policy-stream-001.md",
+                        },
+                        final_score=1.0,
+                    )
+                ],
+            )
+
+    app.state.agent_runtime.orchestrator = StreamingOrchestrator()
+
+    response = await client.post(
+        "/v1/chat/stream",
+        json={"message": "What does the remote-work policy allow?"},
+        headers=auth_headers(),
+    )
+
+    events = parse_sse(response.text)
+    names = [name for name, _ in events]
+    deltas = [event for name, event in events if name == "answer_delta"]
+
+    # Exactly the model's own chunks, marked provisional, and emitted before the
+    # answer was validated rather than replayed from the finished answer afterwards.
+    assert [event["text"] for event in deltas] == ["Remote work ", "is permitted [1]."]
+    assert all(event["provisional"] is True for event in deltas)
+    validation_index = next(
+        index
+        for index, (name, event) in enumerate(events)
+        if name == "activity" and event["event_type"] == "validation_started"
+    )
+    first_delta_index = names.index("answer_delta")
+    assert first_delta_index < validation_index
+    assert events[-1][0] == "final"
+    assert events[-1][1]["answer"] == "Remote work is permitted [1]."
 
 
 @pytest.mark.asyncio

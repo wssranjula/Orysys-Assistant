@@ -50,7 +50,9 @@ packages = ["src/orysys_assistant"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
-pythonpath = ["src"]
+# "." keeps the repo-root `scripts` package importable under `uv run pytest`,
+# which does not place the working directory on sys.path.
+pythonpath = [".", "src"]
 asyncio_mode = "auto"
 
 [tool.ruff]

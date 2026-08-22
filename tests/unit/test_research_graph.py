@@ -292,6 +292,108 @@ async def test_empty_coverage_recurses_once_then_returns_partial_result() -> Non
 
 
 @pytest.mark.asyncio
+async def test_followup_round_plans_new_retrievals_from_prior_context() -> None:
+    class GapClosingPlanner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            self.calls.append({"question": question, **kwargs})
+            if len(self.calls) == 1:
+                return [
+                    "SEARCH: Orion controls reported complete | SOURCE: meeting_note | "
+                    "VERIFY: Establish which controls were reported complete."
+                ]
+            return [
+                "SEARCH: Orion connection budget regression | SOURCE: architecture | "
+                "VERIFY: Explain the runtime evidence that changed the assessment."
+            ]
+
+    planner = GapClosingPlanner()
+    observed: list[tuple[str, str | None]] = []
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        request = cast(KnowledgeSearchInput, parameters)
+        observed.append((request.query, request.document_type))
+        return {
+            "evidence": [
+                evidence_for(f"unrelated-{len(observed)}", "incident").model_dump(mode="json")
+            ]
+        }
+
+    workflow = workflow_with_handler(
+        handler,
+        limits(
+            max_initial_tasks=1,
+            max_followup_tasks=1,
+            max_recursion_depth=1,
+            max_total_tool_calls=4,
+        ),
+        planner,
+    )
+
+    execution = await workflow.run("Investigate Project Orion.", request_context())
+
+    # The follow-up round must consult the planner again with what has already been
+    # tried, and must issue a different retrieval than the initial round.
+    assert len(planner.calls) == 2
+    assert planner.calls[1]["completed_tasks"]
+    assert planner.calls[1]["evidence_titles"]
+    assert observed == [
+        ("Orion controls reported complete", "meeting_note"),
+        ("Orion connection budget regression", "architecture"),
+    ]
+    assert execution.result.partial is True
+
+
+@pytest.mark.asyncio
+async def test_followup_stops_instead_of_repeating_an_attempted_retrieval() -> None:
+    class RepeatingPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            self.calls += 1
+            return ["SEARCH: identical gap query | SOURCE: elsewhere | VERIFY: Nothing new."]
+
+    calls = 0
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"evidence": []}
+
+    planner = RepeatingPlanner()
+    workflow = workflow_with_handler(
+        handler,
+        limits(
+            max_initial_tasks=1,
+            max_followup_tasks=1,
+            max_recursion_depth=2,
+            max_total_tool_calls=8,
+        ),
+        planner,
+    )
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    execution = await workflow.run("Investigate Project Orion.", request_context(), capture)
+
+    # Retrieval is deterministic, so an identical query cannot return new evidence.
+    # The graph must stop rather than spend budget re-running it.
+    assert calls == 1
+    assert planner.calls == 2
+    followups = [
+        item for item in transitions if item.node == "followup_planner" and item.status == "started"
+    ]
+    assert len(followups) == 1
+    assert execution.result.partial is True
+    assert any("already attempted" in warning for warning in execution.result.warnings)
+
+
+@pytest.mark.asyncio
 async def test_tool_call_budget_skips_excess_initial_tasks() -> None:
     calls = 0
 

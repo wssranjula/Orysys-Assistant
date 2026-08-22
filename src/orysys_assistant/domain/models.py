@@ -43,6 +43,7 @@ class ActivityEventType(StrEnum):
     RATE_LIMIT_CHECKED = "rate_limit_checked"
     AGENT_STARTED = "agent_started"
     ROUTING_COMPLETED = "routing_completed"
+    HANDOFF_COMPLETED = "handoff_completed"
     SUBAGENT_STARTED = "subagent_started"
     SUBAGENT_COMPLETED = "subagent_completed"
     RESEARCH_NODE_STARTED = "research_node_started"
@@ -101,6 +102,9 @@ class AnswerDelta(StrictModel):
     conversation_id: UUID
     sequence: int = Field(ge=0)
     text: str = Field(min_length=1)
+    # True while the response agent is still generating, before output validation has
+    # run. Clients must treat the terminal FinalResponse answer as authoritative.
+    provisional: bool = False
 
 
 class FinalResponse(StrictModel):

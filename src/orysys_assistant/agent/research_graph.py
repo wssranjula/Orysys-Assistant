@@ -57,6 +57,7 @@ class ResearchState(TypedDict):
     filters: SearchFilters
     plan: ResearchPlan | None
     pending_tasks: list[ResearchTask]
+    attempted_tasks: Annotated[list[ResearchTask], operator.add]
     task: ResearchTask | None
     worker_results: Annotated[list[ResearchTaskResult], operator.add]
     completed_tasks: list[ResearchTaskResult]
@@ -69,6 +70,7 @@ class ResearchState(TypedDict):
     partial: bool
     sufficient: bool
     failure_circuit_open: bool
+    followups_exhausted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +160,7 @@ class ResearchWorkflow:
             "filters": SearchFilters(),
             "plan": None,
             "pending_tasks": [],
+            "attempted_tasks": [],
             "task": None,
             "worker_results": [],
             "completed_tasks": [],
@@ -170,6 +173,7 @@ class ResearchWorkflow:
             "partial": False,
             "sufficient": False,
             "failure_circuit_open": False,
+            "followups_exhausted": False,
         }
         try:
             async with asyncio.timeout(self._limits.overall_timeout_seconds):
@@ -275,6 +279,8 @@ class ResearchWorkflow:
             warnings.append("Research tool-call budget prevented some tasks from running.")
         return {
             "pending_tasks": tasks,
+            # Accumulated so follow-up rounds can tell which retrievals were already tried.
+            "attempted_tasks": tasks,
             "warnings": warnings,
         }
 
@@ -457,7 +463,10 @@ class ResearchWorkflow:
         budget_exhausted = state["tool_calls_used"] >= self._limits.max_total_tool_calls
         depth_exhausted = state["recursion_depth"] >= self._limits.max_recursion_depth
         partial = not sufficient and (
-            budget_exhausted or depth_exhausted or state["failure_circuit_open"]
+            budget_exhausted
+            or depth_exhausted
+            or state["failure_circuit_open"]
+            or state["followups_exhausted"]
         )
         unresolved = [] if sufficient else self._unresolved(state, covered_task_ids)
         warnings = list(state["warnings"])
@@ -473,6 +482,7 @@ class ResearchWorkflow:
                 "covered_task_count": len(covered_task_ids),
                 "planned_task_count": len(plan_tasks),
                 "failure_circuit_open": state["failure_circuit_open"],
+                "followups_exhausted": state["followups_exhausted"],
             },
         )
         return {
@@ -483,7 +493,12 @@ class ResearchWorkflow:
         }
 
     def _next_after_coverage(self, state: ResearchState) -> Literal["followup", "finalize"]:
-        if state["sufficient"] or state["partial"] or state["failure_circuit_open"]:
+        if (
+            state["sufficient"]
+            or state["partial"]
+            or state["failure_circuit_open"]
+            or state["followups_exhausted"]
+        ):
             return "finalize"
         if self._limits.max_followup_tasks == 0:
             return "finalize"
@@ -492,10 +507,47 @@ class ResearchWorkflow:
     async def _followup_planner(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
     ) -> dict[str, Any]:
+        """Plan a genuinely new retrieval round, or stop if nothing new is left to try.
+
+        The planner sees the tasks already run and the evidence already collected so it
+        can reframe the gap instead of repeating it.  Any task whose retrieval scope
+        matches an earlier attempt is dropped: retrieval is deterministic, so re-issuing
+        an identical query cannot return new evidence and would only burn budget.
+        """
+
         await self._node_event(runtime, "followup_planner", "started")
         depth = state["recursion_depth"] + 1
         warnings = list(state["warnings"])
-        tasks = self._gap_followup_tasks(state, depth)
+        attempted = {self._task_signature(task) for task in state["attempted_tasks"]}
+        planned: list[ResearchTask] = []
+        planner_used = False
+        if self._planner_agent is not None:
+            try:
+                planned = await self._planned_tasks(
+                    state["query"],
+                    SearchFilters(),
+                    max_tasks=self._limits.max_followup_tasks,
+                    prefix=f"followup-{depth}",
+                    completed_tasks=[task.question for task in state["attempted_tasks"]],
+                    evidence_titles=[item.title for item in state["evidence"].values()],
+                )
+                planner_used = True
+            except Exception as exc:
+                warnings.append(
+                    "Model-generated follow-up planning was unavailable; used bounded "
+                    f"fallback: {type(exc).__name__}."
+                )
+
+        tasks = self._unattempted(planned, attempted)
+        if not tasks:
+            planner_used = False
+            tasks = self._unattempted(self._gap_followup_tasks(state, depth), attempted)
+        exhausted = not tasks
+        if exhausted:
+            warnings.append(
+                "Follow-up research stopped because every remaining gap-closing task "
+                "repeated a retrieval that was already attempted."
+            )
         await self._node_event(
             runtime,
             "followup_planner",
@@ -503,6 +555,8 @@ class ResearchWorkflow:
             {
                 "task_count": len(tasks),
                 "plan_summary": self._plan_summary(tasks),
+                "planning_source": "model" if planner_used else "widened_scope_fallback",
+                "followups_exhausted": exhausted,
                 "todos": [
                     {"id": task.task_id, "content": task.question, "status": "pending"}
                     for task in tasks
@@ -512,7 +566,8 @@ class ResearchWorkflow:
         return {
             "pending_tasks": tasks,
             "recursion_depth": depth,
-            "warnings": warnings,
+            "warnings": list(dict.fromkeys(warnings)),
+            "followups_exhausted": exhausted,
         }
 
     async def _finalize(
@@ -603,7 +658,7 @@ class ResearchWorkflow:
         ][: self._limits.max_followup_tasks]
 
     def _gap_followup_tasks(self, state: ResearchState, depth: int) -> list[ResearchTask]:
-        """Retry only uncovered plan requirements with their structured retrieval scope."""
+        """Retry uncovered plan requirements with a deliberately widened retrieval scope."""
         if state["plan"] is None:
             return self._fallback_followup_tasks(state["query"], depth)
         evidence = list(state["evidence"].values())
@@ -611,14 +666,56 @@ class ResearchWorkflow:
             task for task in state["plan"].tasks if not self._task_has_coverage(task, evidence)
         ]
         return [
-            task.model_copy(
-                update={
-                    "task_id": f"followup-{depth}-{index}",
-                    "question": f"Gap-closing follow-up: {task.question}",
-                }
-            )
+            self._widened_task(task, task_id=f"followup-{depth}-{index}")
             for index, task in enumerate(missing[: self._limits.max_followup_tasks], start=1)
         ]
+
+    @staticmethod
+    def _widened_task(task: ResearchTask, *, task_id: str) -> ResearchTask:
+        """Drop the document-type and date narrowing that failed to produce evidence.
+
+        The authorized department scope is preserved because it is a retrieval boundary,
+        not a search heuristic.  Widening changes the candidate set, so unlike a verbatim
+        copy this retry can actually surface evidence the first attempt could not see.
+        """
+
+        return task.model_copy(
+            update={
+                "task_id": task_id,
+                "question": f"Gap-closing follow-up with widened scope: {task.question}",
+                "filters": SearchFilters(department=task.filters.department),
+                "minimum_evidence": 1,
+            }
+        )
+
+    @classmethod
+    def _unattempted(
+        cls, tasks: Sequence[ResearchTask], attempted: set[str]
+    ) -> list[ResearchTask]:
+        """Keep only tasks whose retrieval scope has not already been executed."""
+        seen = set(attempted)
+        fresh: list[ResearchTask] = []
+        for task in tasks:
+            signature = cls._task_signature(task)
+            if signature in seen:
+                continue
+            fresh.append(task)
+            seen.add(signature)
+        return fresh
+
+    @staticmethod
+    def _task_signature(task: ResearchTask) -> str:
+        """Identify a retrieval by the inputs that decide its result set."""
+        filters = task.filters
+        return "|".join(
+            (
+                " ".join((task.search_query or task.question).casefold().split()),
+                filters.document_type or "",
+                filters.department or "",
+                filters.created_after.isoformat() if filters.created_after else "",
+                filters.created_before.isoformat() if filters.created_before else "",
+            )
+        )
 
     @classmethod
     def _compile_planned_task(

@@ -110,7 +110,11 @@ class AgentExecutionResult(AgentModel):
     evidence: list[Evidence] = Field(default_factory=list)
 
 
-class GroundedAnswerDraft(AgentModel):
-    """Model-generated prose; citations remain resolved by deterministic application code."""
+class AnswerToken(AgentModel):
+    """One provisional slice of generated prose.
 
-    answer: str = Field(min_length=1, max_length=20_000)
+    Emitted while the response agent is still writing, so the API can forward it
+    before the turn is validated.  The terminal response stays authoritative.
+    """
+
+    text: str = Field(min_length=1, max_length=8_000)

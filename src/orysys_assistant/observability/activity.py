@@ -12,6 +12,8 @@ SAFE_ACTIVITY_METADATA_KEYS = frozenset(
         "error_type",
         "evidence_count",
         "finding_count",
+        "from_route",
+        "handoff_hop",
         "message_count",
         "partial",
         "plan_summary",

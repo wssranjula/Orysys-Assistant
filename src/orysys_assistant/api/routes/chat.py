@@ -13,7 +13,7 @@ from fastapi import APIRouter, Request
 from langsmith import tracing_context
 from sse_starlette.sse import EventSourceResponse
 
-from orysys_assistant.agent.models import AgentTransition
+from orysys_assistant.agent.models import AgentTransition, AnswerToken
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.api.dependencies import (
     ConversationRepositoryDependency,
@@ -100,6 +100,7 @@ async def stream_chat_events(
     request_id: UUID = request.state.request_id
     conversation_id = conversation.conversation_id
     started = perf_counter()
+    streamed_tokens = 0
     preferences = await repository.list_preferences(context.identity.user_id)
     preference_context = "\n".join(
         f"Explicit preference {item.key}: {item.value}" for item in preferences
@@ -217,6 +218,31 @@ async def stream_chat_events(
                                     metadata=update.metadata,
                                 ),
                             )
+                        elif isinstance(update, AnswerToken):
+                            if streamed_tokens == 0:
+                                yield _sse(
+                                    "activity",
+                                    _activity(
+                                        event_type=ActivityEventType.ANSWER_STREAMING,
+                                        request_id=request_id,
+                                        conversation_id=conversation_id,
+                                        status=ActivityStatus.STARTED,
+                                        message="Response agent is generating the answer.",
+                                        agent=orchestrator.name,
+                                        node="answer_stream",
+                                    ),
+                                )
+                            yield _sse(
+                                "answer_delta",
+                                AnswerDelta(
+                                    request_id=request_id,
+                                    conversation_id=conversation_id,
+                                    sequence=streamed_tokens,
+                                    text=update.text,
+                                    provisional=True,
+                                ),
+                            )
+                            streamed_tokens += 1
                         else:
                             result = update
                 if result is None:
@@ -321,32 +347,34 @@ async def stream_chat_events(
             ),
         )
 
-        yield _sse(
-            "activity",
-            _activity(
-                event_type=ActivityEventType.ANSWER_STREAMING,
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=ActivityStatus.STARTED,
-                message="Streaming the grounded answer.",
-                agent=orchestrator.name,
-                node="answer_stream",
-            ),
-        )
-
-        for sequence, token in enumerate(re.findall(r"\S+\s*", result.answer)):
-            await _ensure_connected(request)
+        if streamed_tokens == 0:
+            # No model tokens were produced (deterministic profile, an injected adapter,
+            # or a synthesis failure), so replay the validated answer word by word.
             yield _sse(
-                "answer_delta",
-                AnswerDelta(
+                "activity",
+                _activity(
+                    event_type=ActivityEventType.ANSWER_STREAMING,
                     request_id=request_id,
                     conversation_id=conversation_id,
-                    sequence=sequence,
-                    text=token,
+                    status=ActivityStatus.STARTED,
+                    message="Streaming the grounded answer.",
+                    agent=orchestrator.name,
+                    node="answer_stream",
                 ),
             )
-            if settings.mock_token_delay_seconds:
-                await asyncio.sleep(settings.mock_token_delay_seconds)
+            for sequence, token in enumerate(re.findall(r"\S+\s*", result.answer)):
+                await _ensure_connected(request)
+                yield _sse(
+                    "answer_delta",
+                    AnswerDelta(
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        sequence=sequence,
+                        text=token,
+                    ),
+                )
+                if settings.mock_token_delay_seconds:
+                    await asyncio.sleep(settings.mock_token_delay_seconds)
 
         duration_ms = round((perf_counter() - started) * 1_000, 2)
         yield _sse(

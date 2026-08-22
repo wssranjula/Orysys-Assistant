@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -9,20 +10,26 @@ from orysys_assistant.agent.build_agent import (
     AgentDependencies,
     build_root_orchestrator,
 )
-from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
+from orysys_assistant.agent.models import (
+    AgentExecutionResult,
+    AgentRoute,
+    AgentTransition,
+    AnswerToken,
+)
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.agent.router import DeterministicIntentRouter, LLMIntentRouter, RouteDecision
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import AuthorizationError
-from orysys_assistant.domain.models import Role
+from orysys_assistant.domain.models import ResponseStatus, Role
 from orysys_assistant.guardrails.output import OutputValidator
+from orysys_assistant.retrieval.models import Evidence
 from orysys_assistant.retrieval.runtime import build_retrieval_runtime
 from orysys_assistant.security.access_scope import AccessScopeService
-from orysys_assistant.security.authorization import AuthorizationPolicy
+from orysys_assistant.security.authorization import AuthorizationPolicy, Capability
 from orysys_assistant.security.models import TrustedRequestContext, UserIdentity
-from orysys_assistant.tools.enterprise import enterprise_tool_specs
-from orysys_assistant.tools.gateway import ToolGateway
+from orysys_assistant.tools.enterprise import SearchServicesInput, enterprise_tool_specs
+from orysys_assistant.tools.gateway import ToolGateway, ToolSpec
 from orysys_assistant.tools.knowledge_search import (
     KNOWLEDGE_QUERY_MAX_LENGTH,
     KnowledgeSearchInput,
@@ -354,4 +361,225 @@ def test_production_orchestrator_is_a_compiled_langgraph() -> None:
         "analysis",
         "enterprise",
         "out_of_scope",
+        "assess",
     } <= set(orchestrator.graph.nodes)
+
+
+class SingleRouteRouter:
+    def __init__(self, route: AgentRoute) -> None:
+        self._route = route
+
+    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
+        return RouteDecision(route=self._route)
+
+
+def orchestrator_with_stubs(
+    route: AgentRoute,
+    knowledge_handler: Any,
+    enterprise_handler: Any = None,
+    **dependency_overrides: Any,
+) -> Any:
+    gateway = ToolGateway(AuthorizationPolicy())
+    gateway.register(
+        ToolSpec(
+            name="knowledge_search",
+            capability=Capability.KNOWLEDGE_SEARCH,
+            input_model=KnowledgeSearchInput,
+            handler=knowledge_handler,
+        )
+    )
+    if enterprise_handler is not None:
+        gateway.register(
+            ToolSpec(
+                name="search_services",
+                capability=Capability.MCP_READ,
+                input_model=SearchServicesInput,
+                handler=enterprise_handler,
+            )
+        )
+    return build_root_orchestrator(
+        AgentDependencies(gateway, router=SingleRouteRouter(route), **dependency_overrides)
+    )
+
+
+def evidence_payload() -> dict[str, Any]:
+    return Evidence(
+        evidence_id="ev_handoff_fixture",
+        document_id="policy-handoff-001",
+        chunk_id="policy-handoff-001:purpose:0000",
+        title="Remote Work Policy",
+        content="Remote work is permitted for approved roles.",
+        metadata={
+            "access_level": "internal",
+            "source_path": "policies/policy-handoff-001.md",
+        },
+        final_score=1.0,
+    ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_empty_enterprise_lookup_hands_off_to_the_knowledge_specialist() -> None:
+    async def empty_enterprise(parameters: Any, request_context: Any) -> dict[str, Any]:
+        return {}
+
+    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
+        return {"evidence": [evidence_payload()]}
+
+    orchestrator = orchestrator_with_stubs(
+        AgentRoute.ENTERPRISE, knowledge, enterprise_handler=empty_enterprise
+    )
+    transitions: list[Any] = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    request_context = context(Role.ANALYST)
+    result = await orchestrator.run("Who owns the payment service?", request_context, capture)
+
+    assert result.route is AgentRoute.DIRECT_KNOWLEDGE
+    assert result.evidence_ids == ["ev_handoff_fixture"]
+    handoffs = [item for item in transitions if item.event_type == "handoff_completed"]
+    assert len(handoffs) == 1
+    assert handoffs[0].metadata["from_route"] == "enterprise"
+    assert handoffs[0].metadata["route"] == "direct_knowledge"
+    assert any("handed off" in warning for warning in result.warnings)
+    # The system of record failed, so the turn is degraded rather than a clean success,
+    # and the substituted answer still has to survive citation validation.
+    assert result.status is ResponseStatus.PARTIAL
+    assert "[1]" in result.answer
+    assert OutputValidator().validate(result, request_context.access_scope).valid is True
+
+
+@pytest.mark.asyncio
+async def test_empty_authorized_lookup_refuses_instead_of_fanning_out() -> None:
+    calls = 0
+
+    async def empty_knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"evidence": []}
+
+    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, empty_knowledge)
+    transitions: list[Any] = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    request_context = context(Role.VIEWER)
+    result = await orchestrator.run(
+        "What is the restricted fraud playbook?", request_context, capture
+    )
+    validation = OutputValidator().validate(result, request_context.access_scope)
+
+    # An empty authorized lookup is a clean refusal, not a reason to spend a research
+    # fan-out that would surface unrelated documents.
+    assert calls == 1
+    assert not any(item.event_type == "handoff_completed" for item in transitions)
+    assert result.route is AgentRoute.DIRECT_KNOWLEDGE
+    assert result.evidence_ids == []
+    assert validation.result.status is ResponseStatus.INSUFFICIENT_EVIDENCE
+
+
+@pytest.mark.asyncio
+async def test_empty_research_falls_back_to_a_single_broad_lookup_once() -> None:
+    question = "Investigate recurring payment incidents across sources."
+
+    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
+        # Research derives narrower per-task queries and finds nothing; only the broad
+        # fallback lookup, which searches the question verbatim, finds the policy.
+        found = parameters.query == question
+        return {"evidence": [evidence_payload()] if found else []}
+
+    orchestrator = orchestrator_with_stubs(AgentRoute.RESEARCH, knowledge)
+    transitions: list[Any] = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    result = await orchestrator.run(question, context(Role.ANALYST), capture)
+
+    handoffs = [item for item in transitions if item.event_type == "handoff_completed"]
+    assert len(handoffs) == 1
+    assert handoffs[0].metadata["from_route"] == "research"
+    assert handoffs[0].metadata["route"] == "direct_knowledge"
+    assert handoffs[0].metadata["handoff_hop"] == 1
+    assert result.route is AgentRoute.DIRECT_KNOWLEDGE
+    assert result.evidence_ids == ["ev_handoff_fixture"]
+    # Recovered, but the selected specialist still failed, so this is not a clean pass.
+    assert result.status is ResponseStatus.PARTIAL
+
+
+@pytest.mark.asyncio
+async def test_specialist_with_evidence_is_not_handed_off() -> None:
+    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
+        return {"evidence": [evidence_payload()]}
+
+    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, knowledge)
+    transitions: list[Any] = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    result = await orchestrator.run("What does the policy allow?", context(Role.VIEWER), capture)
+
+    assert result.route is AgentRoute.DIRECT_KNOWLEDGE
+    assert not any(item.event_type == "handoff_completed" for item in transitions)
+    assert not any("handed off" in warning for warning in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_response_agent_streams_answer_tokens_before_the_final_result() -> None:
+    class FakeStreamingSynthesizer:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def astream(self, prompt: str) -> AsyncIterator[str]:
+            self.prompts.append(prompt)
+            for piece in ("Remote work ", "is permitted ", "for approved roles [1]."):
+                yield piece
+
+    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
+        return {"evidence": [evidence_payload()]}
+
+    synthesizer = FakeStreamingSynthesizer()
+    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, knowledge)
+    orchestrator._synthesizer = synthesizer
+    orchestrator.graph = orchestrator._compile()
+
+    updates = [
+        update
+        async for update in orchestrator.stream("What does the policy allow?", context(Role.VIEWER))
+    ]
+
+    tokens = [item for item in updates if isinstance(item, AnswerToken)]
+    results = [item for item in updates if isinstance(item, AgentExecutionResult)]
+    assert [item.text for item in tokens] == [
+        "Remote work ",
+        "is permitted ",
+        "for approved roles [1].",
+    ]
+    # Tokens must reach the caller before the terminal result, not after it.
+    assert updates.index(tokens[-1]) < updates.index(results[0])
+    assert results[0].answer == "Remote work is permitted for approved roles [1]."
+    assert "Remote Work Policy" in synthesizer.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_synthesis_failure_keeps_the_deterministic_specialist_answer() -> None:
+    class FailingSynthesizer:
+        async def astream(self, prompt: str) -> AsyncIterator[str]:
+            raise RuntimeError("model unavailable")
+            yield ""  # pragma: no cover - unreachable, keeps this an async generator
+
+    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
+        return {"evidence": [evidence_payload()]}
+
+    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, knowledge)
+    orchestrator._synthesizer = FailingSynthesizer()
+    orchestrator.graph = orchestrator._compile()
+
+    result = await orchestrator.run("What does the policy allow?", context(Role.VIEWER))
+
+    assert "Remote Work Policy" in result.answer
+    assert result.status is ResponseStatus.PARTIAL
+    assert any("synthesis was unavailable" in warning for warning in result.warnings)
