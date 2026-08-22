@@ -1,0 +1,253 @@
+"""Owner-isolated in-memory and PostgreSQL conversation repositories."""
+
+import asyncio
+import json
+from typing import Any, Protocol
+from uuid import UUID
+
+import asyncpg  # type: ignore[import-untyped]
+
+from orysys_assistant.domain.errors import AuthorizationError
+from orysys_assistant.memory.models import ConversationRecord, StoredMessage
+
+
+class ConversationRepository(Protocol):
+    persistence_name: str
+
+    async def get_or_create(self, conversation_id: UUID, user_id: str) -> ConversationRecord: ...
+
+    async def get(self, conversation_id: UUID, user_id: str) -> ConversationRecord | None: ...
+
+    async def append_turn(
+        self,
+        conversation_id: UUID,
+        user_id: str,
+        user_message: str,
+        assistant_message: str,
+        evidence_ids: list[str],
+    ) -> ConversationRecord: ...
+
+    async def close(self) -> None: ...
+
+
+def _updated_record(
+    record: ConversationRecord,
+    user_message: str,
+    assistant_message: str,
+    evidence_ids: list[str],
+    max_messages: int,
+    max_summary_characters: int,
+) -> ConversationRecord:
+    messages = [
+        *record.messages,
+        StoredMessage(role="user", content=user_message),
+        StoredMessage(role="assistant", content=assistant_message),
+    ][-max_messages:]
+    transcript = "\n".join(f"{message.role.title()}: {message.content}" for message in messages)
+    summary = transcript[-max_summary_characters:]
+    return record.model_copy(
+        update={
+            "messages": messages,
+            "summary": summary,
+            "evidence_ids": list(dict.fromkeys([*record.evidence_ids, *evidence_ids])),
+        }
+    )
+
+
+class InMemoryConversationRepository:
+    persistence_name = "in_memory"
+
+    def __init__(self, max_messages: int, max_summary_characters: int) -> None:
+        self._records: dict[UUID, ConversationRecord] = {}
+        self._lock = asyncio.Lock()
+        self._max_messages = max_messages
+        self._max_summary_characters = max_summary_characters
+
+    async def get_or_create(self, conversation_id: UUID, user_id: str) -> ConversationRecord:
+        async with self._lock:
+            record = self._records.get(conversation_id)
+            if record is None:
+                record = ConversationRecord(conversation_id=conversation_id, user_id=user_id)
+                self._records[conversation_id] = record
+            self._require_owner(record, user_id)
+            return record.model_copy(deep=True)
+
+    async def get(self, conversation_id: UUID, user_id: str) -> ConversationRecord | None:
+        async with self._lock:
+            record = self._records.get(conversation_id)
+            if record is None:
+                return None
+            self._require_owner(record, user_id)
+            return record.model_copy(deep=True)
+
+    async def append_turn(
+        self,
+        conversation_id: UUID,
+        user_id: str,
+        user_message: str,
+        assistant_message: str,
+        evidence_ids: list[str],
+    ) -> ConversationRecord:
+        async with self._lock:
+            record = self._records.get(conversation_id)
+            if record is None:
+                record = ConversationRecord(conversation_id=conversation_id, user_id=user_id)
+            self._require_owner(record, user_id)
+            updated = _updated_record(
+                record,
+                user_message,
+                assistant_message,
+                evidence_ids,
+                self._max_messages,
+                self._max_summary_characters,
+            )
+            self._records[conversation_id] = updated
+            return updated.model_copy(deep=True)
+
+    async def close(self) -> None:
+        return None
+
+    @staticmethod
+    def _require_owner(record: ConversationRecord, user_id: str) -> None:
+        if record.user_id != user_id:
+            raise AuthorizationError("You are not authorized to access this conversation.")
+
+
+class PostgresConversationRepository:
+    persistence_name = "postgres"
+
+    def __init__(self, database_url: str, max_messages: int, max_summary_characters: int) -> None:
+        self._database_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+        self._max_messages = max_messages
+        self._max_summary_characters = max_summary_characters
+        self._pool: asyncpg.Pool | None = None
+
+    async def start(self) -> None:
+        if self._pool is not None:
+            return
+        self._pool = await asyncpg.create_pool(self._database_url, min_size=1, max_size=5)
+        async with self._pool.acquire() as connection:
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    conversation_id UUID PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    summary TEXT NOT NULL DEFAULT '',
+                    evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+    async def get_or_create(self, conversation_id: UUID, user_id: str) -> ConversationRecord:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO conversations (conversation_id, user_id)
+                VALUES ($1, $2) ON CONFLICT (conversation_id) DO NOTHING
+                """,
+                conversation_id,
+                user_id,
+            )
+            row = await connection.fetchrow(
+                "SELECT * FROM conversations WHERE conversation_id = $1", conversation_id
+            )
+        record = self._from_row(row)
+        self._require_owner(record, user_id)
+        return record
+
+    async def get(self, conversation_id: UUID, user_id: str) -> ConversationRecord | None:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM conversations WHERE conversation_id = $1", conversation_id
+            )
+        if row is None:
+            return None
+        record = self._from_row(row)
+        self._require_owner(record, user_id)
+        return record
+
+    async def append_turn(
+        self,
+        conversation_id: UUID,
+        user_id: str,
+        user_message: str,
+        assistant_message: str,
+        evidence_ids: list[str],
+    ) -> ConversationRecord:
+        pool = self._require_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            row = await connection.fetchrow(
+                "SELECT * FROM conversations WHERE conversation_id = $1 FOR UPDATE",
+                conversation_id,
+            )
+            if row is None:
+                await connection.execute(
+                    "INSERT INTO conversations (conversation_id, user_id) VALUES ($1, $2)",
+                    conversation_id,
+                    user_id,
+                )
+                row = await connection.fetchrow(
+                    "SELECT * FROM conversations WHERE conversation_id = $1 FOR UPDATE",
+                    conversation_id,
+                )
+            record = self._from_row(row)
+            self._require_owner(record, user_id)
+            updated = _updated_record(
+                record,
+                user_message,
+                assistant_message,
+                evidence_ids,
+                self._max_messages,
+                self._max_summary_characters,
+            )
+            await connection.execute(
+                """
+                UPDATE conversations
+                SET messages = $2::jsonb, summary = $3, evidence_ids = $4::jsonb,
+                    updated_at = NOW()
+                WHERE conversation_id = $1
+                """,
+                conversation_id,
+                json.dumps([item.model_dump(mode="json") for item in updated.messages]),
+                updated.summary,
+                json.dumps(updated.evidence_ids),
+            )
+        return updated
+
+    async def close(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+
+    def _require_pool(self) -> asyncpg.Pool:
+        if self._pool is None:
+            raise RuntimeError("PostgreSQL conversation repository has not been started.")
+        return self._pool
+
+    @staticmethod
+    def _from_row(row: Any) -> ConversationRecord:
+        if row is None:
+            raise RuntimeError("Conversation row was not found.")
+        messages = row["messages"]
+        evidence_ids = row["evidence_ids"]
+        if isinstance(messages, str):
+            messages = json.loads(messages)
+        if isinstance(evidence_ids, str):
+            evidence_ids = json.loads(evidence_ids)
+        return ConversationRecord(
+            conversation_id=row["conversation_id"],
+            user_id=row["user_id"],
+            messages=[StoredMessage.model_validate(item) for item in messages],
+            summary=row["summary"],
+            evidence_ids=evidence_ids,
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _require_owner(record: ConversationRecord, user_id: str) -> None:
+        if record.user_id != user_id:
+            raise AuthorizationError("You are not authorized to access this conversation.")

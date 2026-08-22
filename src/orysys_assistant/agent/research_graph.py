@@ -81,9 +81,15 @@ class ResearchLimits:
 class ResearchWorkflow:
     """Own one reusable compiled graph; all execution limits are code-enforced."""
 
-    def __init__(self, toolbox: ScopedToolbox, limits: ResearchLimits) -> None:
+    def __init__(
+        self,
+        toolbox: ScopedToolbox,
+        limits: ResearchLimits,
+        checkpointer: Any = None,
+    ) -> None:
         self._toolbox = toolbox
         self._limits = limits
+        self._checkpointer = checkpointer
         self.graph = self._compile()
 
     def _compile(self) -> Any:
@@ -107,13 +113,14 @@ class ResearchWorkflow:
         )
         builder.add_edge("followup_planner", "workers")
         builder.add_edge("finalize", END)
-        return builder.compile()
+        return builder.compile(checkpointer=self._checkpointer)
 
     async def run(
         self,
         query: str,
         context: TrustedRequestContext,
         transition_sink: TransitionSink | None = None,
+        thread_id: str | None = None,
     ) -> ResearchExecution:
         initial: ResearchState = {
             "request_id": str(uuid4()),
@@ -136,6 +143,11 @@ class ResearchWorkflow:
             async with asyncio.timeout(self._limits.overall_timeout_seconds):
                 final = await self.graph.ainvoke(
                     initial,
+                    config={
+                        "configurable": {
+                            "thread_id": thread_id or initial["request_id"],
+                        }
+                    },
                     context=ResearchGraphContext(context, transition_sink),
                 )
         except TimeoutError:
@@ -181,9 +193,7 @@ class ResearchWorkflow:
             tasks=tasks[: self._limits.max_initial_tasks],
             aggregation_method="deduplicate evidence and aggregate recurring supported claims",
         )
-        await self._node_event(
-            runtime, "planner", "completed", {"task_count": len(plan.tasks)}
-        )
+        await self._node_event(runtime, "planner", "completed", {"task_count": len(plan.tasks)})
         return {"plan": plan, "pending_tasks": plan.tasks}
 
     async def _workers(
@@ -345,9 +355,7 @@ class ResearchWorkflow:
                 (("runbook", "runbook"), ("architecture", "architecture")), start=1
             )
         ][: self._limits.max_followup_tasks]
-        await self._node_event(
-            runtime, "followup_planner", "completed", {"task_count": len(tasks)}
-        )
+        await self._node_event(runtime, "followup_planner", "completed", {"task_count": len(tasks)})
         return {"pending_tasks": tasks, "recursion_depth": depth}
 
     async def _finalize(

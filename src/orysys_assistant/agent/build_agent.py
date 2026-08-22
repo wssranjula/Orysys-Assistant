@@ -38,6 +38,7 @@ _profile_registered = False
 class AgentDependencies:
     gateway: ToolGateway
     settings: Settings | None = None
+    checkpointer: Any = None
 
 
 def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator:
@@ -47,16 +48,22 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
     research = ResearchSubagent(
         ScopedToolbox(gateway, frozenset({"knowledge_search"})),
         ResearchLimits.from_settings(settings),
+        dependencies.checkpointer,
     )
-    analysis = AnalysisSubagent(ScopedToolbox(gateway, frozenset({"knowledge_search"})))
+    analysis = AnalysisSubagent(
+        ScopedToolbox(gateway, frozenset({"knowledge_search", "structured_analysis"}))
+    )
     enterprise = EnterpriseToolSubagent(
         ScopedToolbox(
             gateway,
             frozenset(
                 {
-                    "employee_directory.lookup",
-                    "service_catalog.search",
-                    "incident_records.search",
+                    "get_employee",
+                    "search_employees",
+                    "get_service",
+                    "search_services",
+                    "get_incident",
+                    "search_incidents",
                 }
             ),
         )
@@ -97,12 +104,18 @@ def build_deep_agent_graph(
     knowledge_search = _gateway_tool(
         "knowledge_search", "Search authorized Commercial Bank evidence.", gateway, context
     )
+    structured_analysis = _gateway_tool(
+        "structured_analysis", "Run approved bounded structured analysis.", gateway, context
+    )
     enterprise_tools = [
         _gateway_tool(name, f"Execute approved read-only enterprise tool {name}.", gateway, context)
         for name in (
-            "employee_directory.lookup",
-            "service_catalog.search",
-            "incident_records.search",
+            "get_employee",
+            "search_employees",
+            "get_service",
+            "search_services",
+            "get_incident",
+            "search_incidents",
         )
     ]
     subagents: list[SubAgent] = [
@@ -118,7 +131,7 @@ def build_deep_agent_graph(
             "system_prompt": (
                 "Retrieve evidence and return only the approved structured analysis schema."
             ),
-            "tools": [knowledge_search],
+            "tools": [knowledge_search, structured_analysis],
         },
         {
             "name": "enterprise-tools",

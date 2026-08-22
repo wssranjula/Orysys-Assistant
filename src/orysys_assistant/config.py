@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     research_overall_timeout_seconds: float = Field(default=90, gt=0, le=180)
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = Field(default=1536, gt=0)
+    memory_backend: str = "memory"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/orysys_assistant"
+    memory_max_recent_messages: int = Field(default=20, gt=0, le=100)
+    memory_max_summary_characters: int = Field(default=8_000, gt=0, le=20_000)
+    analysis_max_records: int = Field(default=1_000, gt=0, le=5_000)
+    mcp_backend: str = "memory"
+    mcp_server_url: str = "http://localhost:8100/mcp"
+    mcp_timeout_seconds: float = Field(default=10, gt=0, le=60)
+    mcp_max_result_bytes: int = Field(default=100_000, gt=0, le=1_000_000)
     redis_url: str = "redis://localhost:6379/0"
     rate_limit_backend: str = "redis"
     rate_limit_viewer_capacity: int = Field(default=10, gt=0)

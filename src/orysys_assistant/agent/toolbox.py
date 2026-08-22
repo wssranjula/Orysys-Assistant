@@ -25,4 +25,3 @@ class ScopedToolbox:
         if tool_name not in self._allowed_tools:
             raise AuthorizationError("This agent is not permitted to use the requested tool.")
         return await self._gateway.execute(tool_name, parameters, context)
-

@@ -52,6 +52,7 @@ class ActivityEventType(StrEnum):
     TOOL_COMPLETED = "tool_completed"
     TOOL_DENIED = "tool_denied"
     MEMORY_UPDATED = "memory_updated"
+    MEMORY_LOADED = "memory_loaded"
     VALIDATION_STARTED = "validation_started"
     VALIDATION_FAILED = "validation_failed"
     ANSWER_STREAMING = "answer_streaming"
@@ -125,7 +126,9 @@ class ErrorEnvelope(StrictModel):
 class ConversationSnapshot(StrictModel):
     conversation_id: UUID
     messages: list[dict[str, str]] = Field(default_factory=list)
-    persistence: str = "not_available_in_phase_1"
+    summary: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    persistence: str = "available"
 
 
 class FeedbackRequest(StrictModel):

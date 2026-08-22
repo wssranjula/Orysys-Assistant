@@ -9,6 +9,7 @@ from orysys_assistant.api.error_handlers import register_error_handlers
 from orysys_assistant.api.middleware import RequestContextMiddleware
 from orysys_assistant.api.routes import auth, chat, conversations, feedback, health
 from orysys_assistant.config import Settings, get_settings
+from orysys_assistant.memory.runtime import MemoryRuntime
 from orysys_assistant.observability.logging import configure_logging, get_logger
 from orysys_assistant.retrieval.runtime import AgentRuntimeManager
 from orysys_assistant.security.access_scope import AccessScopeService
@@ -30,7 +31,8 @@ def create_app(
     authorization_policy = AuthorizationPolicy()
     resolved_rate_limiter = rate_limiter or build_rate_limiter(resolved_settings)
     tool_gateway = ToolGateway(authorization_policy)
-    agent_runtime = AgentRuntimeManager(resolved_settings, tool_gateway)
+    memory_runtime = MemoryRuntime(resolved_settings)
+    agent_runtime = AgentRuntimeManager(resolved_settings, tool_gateway, memory_runtime)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -42,6 +44,7 @@ def create_app(
         await agent_runtime.get_orchestrator()
         yield
         await agent_runtime.close()
+        await memory_runtime.close()
         await resolved_rate_limiter.close()
         logger.info("application_stopped")
 
@@ -57,6 +60,7 @@ def create_app(
     app.state.rate_limiter = resolved_rate_limiter
     app.state.tool_gateway = tool_gateway
     app.state.agent_runtime = agent_runtime
+    app.state.memory_runtime = memory_runtime
     app.add_middleware(RequestContextMiddleware)
     register_error_handlers(app)
     app.include_router(health.router)

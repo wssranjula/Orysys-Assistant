@@ -48,13 +48,15 @@ class RootOrchestrator:
     @traceable(
         name="root-deep-agent-orchestration",
         run_type="chain",
-        metadata={"agent": "root_deep_agent", "phase": 4},
+        metadata={"agent": "root_deep_agent", "phase": 6},
     )
     async def run(
         self,
         question: str,
         context: TrustedRequestContext,
         transition_sink: TransitionSink | None = None,
+        conversation_summary: str = "",
+        thread_id: str | None = None,
     ) -> AgentExecutionResult:
         await self._emit(
             transition_sink,
@@ -79,13 +81,16 @@ class RootOrchestrator:
             ),
         )
 
+        grounded_question = self._with_conversation_context(question, conversation_summary)
         if route is AgentRoute.DIRECT_KNOWLEDGE:
-            return await self._direct(question, context, transition_sink)
+            return await self._direct(grounded_question, context, transition_sink)
         if route is AgentRoute.RESEARCH:
-            return await self._delegate_research(question, context, transition_sink)
+            return await self._delegate_research(
+                grounded_question, context, transition_sink, thread_id
+            )
         if route is AgentRoute.ANALYSIS:
-            return await self._delegate_analysis(question, context, transition_sink)
-        return await self._delegate_enterprise(question, context, transition_sink)
+            return await self._delegate_analysis(grounded_question, context, transition_sink)
+        return await self._delegate_enterprise(grounded_question, context, transition_sink)
 
     async def _direct(
         self,
@@ -112,9 +117,10 @@ class RootOrchestrator:
         question: str,
         context: TrustedRequestContext,
         sink: TransitionSink | None,
+        thread_id: str | None,
     ) -> AgentExecutionResult:
         await self._subagent_transition(sink, self._research.name, "started")
-        execution = await self._research.run(question, context, sink)
+        execution = await self._research.run(question, context, sink, thread_id)
         await self._subagent_transition(sink, self._research.name, "completed")
         return self._research_response(execution)
 
@@ -125,7 +131,7 @@ class RootOrchestrator:
         sink: TransitionSink | None,
     ) -> AgentExecutionResult:
         await self._subagent_transition(sink, self._analysis.name, "started")
-        execution = await self._analysis.run(question, context)
+        execution = await self._analysis.run(question, context, sink)
         await self._subagent_transition(sink, self._analysis.name, "completed")
         return self._analysis_response(execution)
 
@@ -136,7 +142,7 @@ class RootOrchestrator:
         sink: TransitionSink | None,
     ) -> AgentExecutionResult:
         await self._subagent_transition(sink, self._enterprise.name, "started")
-        execution = await self._enterprise.run(question, context)
+        execution = await self._enterprise.run(question, context, sink)
         await self._subagent_transition(sink, self._enterprise.name, "completed")
         return self._enterprise_response(execution)
 
@@ -210,7 +216,9 @@ class RootOrchestrator:
             f"{execution.result.operation}."
         ]
         for row in execution.result.results:
-            lines.append(f"- {row['document_type']}: {row['count']}")
+            label = row.get("value", row.get("date", "unknown"))
+            suffix = f" ({row['percentage']}%)" if "percentage" in row else ""
+            lines.append(f"- {label}: {row['count']}{suffix}")
         return AgentExecutionResult(
             route=AgentRoute.ANALYSIS,
             answer="\n".join(lines),
@@ -246,3 +254,9 @@ class RootOrchestrator:
             )
             for index, item in enumerate(evidence, start=1)
         ]
+
+    @staticmethod
+    def _with_conversation_context(question: str, summary: str) -> str:
+        if not summary:
+            return question
+        return f"{question}\n\nPrior conversation summary:\n{summary}"

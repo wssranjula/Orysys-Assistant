@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import InvalidRequestError
+from orysys_assistant.memory.runtime import MemoryRuntime
 from orysys_assistant.retrieval.chunking import SectionAwareChunker
 from orysys_assistant.retrieval.embeddings import (
     DeterministicHashEmbedding,
@@ -133,10 +134,12 @@ class AgentRuntimeManager:
         self,
         settings: Settings,
         gateway: ToolGateway,
+        memory_runtime: MemoryRuntime,
         project_root: Path | None = None,
     ) -> None:
         self._settings = settings
         self._gateway = gateway
+        self._memory_runtime = memory_runtime
         self._project_root = project_root
         self._lock = asyncio.Lock()
         self._runtime: RetrievalRuntime | None = None
@@ -150,14 +153,42 @@ class AgentRuntimeManager:
                         AgentDependencies,
                         build_root_orchestrator,
                     )
+                    from orysys_assistant.tools.enterprise import enterprise_tool_specs
                     from orysys_assistant.tools.knowledge_search import knowledge_search_spec
+                    from orysys_assistant.tools.mcp_client import (
+                        InMemoryEnterpriseClient,
+                        MCPClientAdapter,
+                    )
+                    from orysys_assistant.tools.python_analysis import python_analysis_spec
 
+                    await self._memory_runtime.start()
                     self._runtime = await build_retrieval_runtime(
                         self._settings, self._project_root
                     )
                     self._gateway.register(knowledge_search_spec(self._runtime.service))
+                    self._gateway.register(
+                        python_analysis_spec(self._settings.analysis_max_records)
+                    )
+                    enterprise_client = (
+                        InMemoryEnterpriseClient()
+                        if self._settings.mcp_backend == "memory"
+                        else MCPClientAdapter(
+                            self._settings.mcp_server_url,
+                            self._settings.mcp_timeout_seconds,
+                        )
+                    )
+                    for spec in enterprise_tool_specs(
+                        enterprise_client,
+                        self._settings.mcp_timeout_seconds,
+                        self._settings.mcp_max_result_bytes,
+                    ):
+                        self._gateway.register(spec)
                     self._orchestrator = build_root_orchestrator(
-                        AgentDependencies(self._gateway, self._settings)
+                        AgentDependencies(
+                            self._gateway,
+                            self._settings,
+                            self._memory_runtime.checkpointer,
+                        )
                     )
         return self._orchestrator
 

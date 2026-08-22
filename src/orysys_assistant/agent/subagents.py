@@ -1,11 +1,12 @@
 """Three static specialists with small, explicit tool surfaces."""
 
-from collections import Counter
+import re
 from typing import Any
 
 from langsmith import traceable
 
 from orysys_assistant.agent.models import (
+    AgentTransition,
     AnalysisExecution,
     AnalysisResult,
     EnterpriseExecution,
@@ -14,7 +15,7 @@ from orysys_assistant.agent.models import (
 )
 from orysys_assistant.agent.research_graph import ResearchLimits, ResearchWorkflow, TransitionSink
 from orysys_assistant.agent.toolbox import ScopedToolbox
-from orysys_assistant.domain.errors import InvalidRequestError
+from orysys_assistant.domain.errors import AuthorizationError, InvalidRequestError, ToolTimeoutError
 from orysys_assistant.retrieval.models import Evidence
 from orysys_assistant.security.models import TrustedRequestContext
 
@@ -28,8 +29,8 @@ def _evidence_from_tool(result: Any) -> list[Evidence]:
 class ResearchSubagent:
     name = "research_subagent"
 
-    def __init__(self, toolbox: ScopedToolbox, limits: ResearchLimits) -> None:
-        self.workflow = ResearchWorkflow(toolbox, limits)
+    def __init__(self, toolbox: ScopedToolbox, limits: ResearchLimits, checkpointer: Any) -> None:
+        self.workflow = ResearchWorkflow(toolbox, limits, checkpointer)
 
     @traceable(
         name="delegate-research-subagent",
@@ -41,8 +42,9 @@ class ResearchSubagent:
         question: str,
         context: TrustedRequestContext,
         transition_sink: TransitionSink | None = None,
+        thread_id: str | None = None,
     ) -> ResearchExecution:
-        return await self.workflow.run(question, context, transition_sink)
+        return await self.workflow.run(question, context, transition_sink, thread_id)
 
 
 class AnalysisSubagent:
@@ -56,7 +58,12 @@ class AnalysisSubagent:
         run_type="chain",
         metadata={"agent": "analysis_subagent", "delegated": True},
     )
-    async def run(self, question: str, context: TrustedRequestContext) -> AnalysisExecution:
+    async def run(
+        self,
+        question: str,
+        context: TrustedRequestContext,
+        transition_sink: TransitionSink | None = None,
+    ) -> AnalysisExecution:
         evidence = _evidence_from_tool(
             await self._toolbox.execute(
                 "knowledge_search",
@@ -64,22 +71,59 @@ class AnalysisSubagent:
                 context,
             )
         )
-        counts = Counter(str(item.metadata.get("document_type", "unknown")) for item in evidence)
-        rows = [
-            {"document_type": document_type, "count": count}
-            for document_type, count in sorted(counts.items())
-        ]
+        if transition_sink is not None:
+            await transition_sink(
+                AgentTransition(
+                    event_type="tool_started",
+                    agent=self.name,
+                    node="structured_analysis",
+                    status="started",
+                    message="Controlled structured analysis started.",
+                )
+            )
+        try:
+            raw = await self._toolbox.execute(
+                "structured_analysis",
+                {
+                    "operation": "count_by",
+                    "records": [
+                        {
+                            "document_type": item.metadata.get("document_type", "unknown"),
+                            "created_date": item.metadata.get("created_date"),
+                            "fixture_id": item.metadata.get("fixture_id"),
+                        }
+                        for item in evidence
+                    ],
+                    "field": "document_type",
+                },
+                context,
+            )
+        except AuthorizationError:
+            if transition_sink is not None:
+                await transition_sink(
+                    AgentTransition(
+                        event_type="tool_denied",
+                        agent=self.name,
+                        node="structured_analysis",
+                        status="denied",
+                        message="Structured analysis was denied by role policy.",
+                    )
+                )
+            raise
+        result = AnalysisResult.model_validate(raw)
+        if transition_sink is not None:
+            await transition_sink(
+                AgentTransition(
+                    event_type="tool_completed",
+                    agent=self.name,
+                    node="structured_analysis",
+                    status="completed",
+                    message="Controlled structured analysis completed.",
+                    metadata={"rows_processed": result.rows_processed},
+                )
+            )
         return AnalysisExecution(
-            result=AnalysisResult(
-                operation="count_evidence_by_document_type",
-                rows_processed=len(evidence),
-                results=rows,
-                warnings=(
-                    ["Phase 6 will add the controlled structured-analysis tool."]
-                    if evidence
-                    else ["No authorized evidence was available for analysis."]
-                ),
-            ),
+            result=result,
             evidence=evidence,
         )
 
@@ -95,21 +139,65 @@ class EnterpriseToolSubagent:
         run_type="tool",
         metadata={"agent": "enterprise_tool_subagent", "delegated": True},
     )
-    async def run(self, question: str, context: TrustedRequestContext) -> EnterpriseExecution:
-        tool_name = self._select_tool(question)
-        try:
-            data = await self._toolbox.execute(
-                tool_name,
-                {"query": question},
-                context,
+    async def run(
+        self,
+        question: str,
+        context: TrustedRequestContext,
+        transition_sink: TransitionSink | None = None,
+    ) -> EnterpriseExecution:
+        tool_name, parameters = self._select_tool(question)
+        if transition_sink is not None:
+            await transition_sink(
+                AgentTransition(
+                    event_type="tool_started",
+                    agent=self.name,
+                    node=tool_name,
+                    status="started",
+                    message=f"Read-only enterprise tool {tool_name} started.",
+                )
             )
-        except InvalidRequestError:
+        try:
+            data = await self._toolbox.execute(tool_name, parameters, context)
+        except AuthorizationError:
+            if transition_sink is not None:
+                await transition_sink(
+                    AgentTransition(
+                        event_type="tool_denied",
+                        agent=self.name,
+                        node=tool_name,
+                        status="denied",
+                        message=f"Enterprise tool {tool_name} was denied by role policy.",
+                    )
+                )
+            raise
+        except (InvalidRequestError, ToolTimeoutError) as exc:
+            if transition_sink is not None:
+                await transition_sink(
+                    AgentTransition(
+                        event_type="tool_completed",
+                        agent=self.name,
+                        node=tool_name,
+                        status="degraded",
+                        message=f"Enterprise tool {tool_name} was unavailable.",
+                        metadata={"error_type": type(exc).__name__},
+                    )
+                )
             return EnterpriseExecution(
                 result=EnterpriseToolResult(
                     tool_name=tool_name,
                     data={},
                     source="enterprise_tool_gateway",
-                    warnings=["The requested enterprise data source is not available in Phase 4."],
+                    warnings=[f"The enterprise tool was unavailable: {type(exc).__name__}."],
+                )
+            )
+        if transition_sink is not None:
+            await transition_sink(
+                AgentTransition(
+                    event_type="tool_completed",
+                    agent=self.name,
+                    node=tool_name,
+                    status="completed",
+                    message=f"Read-only enterprise tool {tool_name} completed.",
                 )
             )
         return EnterpriseExecution(
@@ -121,13 +209,22 @@ class EnterpriseToolSubagent:
         )
 
     @staticmethod
-    def _select_tool(question: str) -> str:
+    def _select_tool(question: str) -> tuple[str, dict[str, Any]]:
         normalized = question.lower()
+        employee_id = re.search(r"\bEMP-[0-9]{3}\b", question, re.I)
+        service_id = re.search(r"\bSVC-[A-Z]+-[0-9]{3}\b", question, re.I)
+        incident_id = re.search(r"\bINC-[0-9]{4}-[0-9]{3}\b", question, re.I)
+        if employee_id:
+            return "get_employee", {"employee_id": employee_id.group().upper()}
+        if service_id:
+            return "get_service", {"service_id": service_id.group().upper()}
+        if incident_id:
+            return "get_incident", {"incident_id": incident_id.group().upper()}
         if "employee" in normalized or "person" in normalized:
-            return "employee_directory.lookup"
+            return "search_employees", {"name": question}
         if "incident" in normalized:
-            return "incident_records.search"
-        return "service_catalog.search"
+            return "search_incidents", {"query": question}
+        return "search_services", {"query": question}
 
 
 def _first_sentence(content: str, max_characters: int = 280) -> str:

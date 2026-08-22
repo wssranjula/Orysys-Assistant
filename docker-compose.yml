@@ -1,4 +1,18 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: orysys_assistant
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orysys_assistant"]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
@@ -7,6 +21,13 @@ services:
       interval: 3s
       timeout: 2s
       retries: 10
+
+  mcp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mcp
+    expose:
+      - "8100"
 
   api:
     build:
@@ -17,6 +38,10 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       REDIS_URL: redis://redis:6379/0
       RATE_LIMIT_BACKEND: redis
+      MEMORY_BACKEND: postgres
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/orysys_assistant
+      MCP_BACKEND: http
+      MCP_SERVER_URL: http://mcp:8100/mcp
       AUTH_VIEWER_TOKEN: ${AUTH_VIEWER_TOKEN:-phase2-viewer-demo-token}
       AUTH_ANALYST_TOKEN: ${AUTH_ANALYST_TOKEN:-phase2-analyst-demo-token}
       AUTH_ADMIN_TOKEN: ${AUTH_ADMIN_TOKEN:-phase2-administrator-demo-token}
@@ -28,6 +53,10 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mcp:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
       interval: 5s
@@ -45,3 +74,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
+volumes:
+  postgres-data:

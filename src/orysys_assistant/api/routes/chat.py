@@ -14,6 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 from orysys_assistant.agent.models import AgentTransition
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.api.dependencies import (
+    ConversationRepositoryDependency,
     RootOrchestratorDependency,
     SettingsDependency,
     TrustedChatContextDependency,
@@ -28,6 +29,8 @@ from orysys_assistant.domain.models import (
     FinalResponse,
     ResponseStatus,
 )
+from orysys_assistant.memory.models import ConversationRecord
+from orysys_assistant.memory.repository import ConversationRepository
 from orysys_assistant.observability.logging import get_logger
 from orysys_assistant.security.models import TrustedRequestContext
 
@@ -77,9 +80,11 @@ async def stream_chat_events(
     settings: Settings,
     context: TrustedRequestContext,
     orchestrator: RootOrchestrator,
+    repository: ConversationRepository,
+    conversation: ConversationRecord,
 ) -> AsyncIterator[dict[str, str]]:
     request_id: UUID = request.state.request_id
-    conversation_id = payload.conversation_id or uuid4()
+    conversation_id = conversation.conversation_id
     started = perf_counter()
     structlog.contextvars.bind_contextvars(
         conversation_id=str(conversation_id),
@@ -123,9 +128,27 @@ async def stream_chat_events(
                 node="request_entry",
             ),
         )
+        yield _sse(
+            "activity",
+            _activity(
+                event_type=ActivityEventType.MEMORY_LOADED,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.COMPLETED,
+                message=f"Loaded {len(conversation.messages)} recent conversation messages.",
+                node="conversation_memory",
+                metadata={"evidence_count": len(conversation.evidence_ids)},
+            ),
+        )
         transitions: asyncio.Queue[AgentTransition] = asyncio.Queue()
         agent_task = asyncio.create_task(
-            orchestrator.run(payload.message, context, transitions.put)
+            orchestrator.run(
+                payload.message,
+                context,
+                transitions.put,
+                conversation.summary,
+                f"{context.identity.user_id}:{conversation_id}",
+            )
         )
         try:
             while not agent_task.done() or not transitions.empty():
@@ -153,6 +176,26 @@ async def stream_chat_events(
                 agent_task.cancel()
             await asyncio.gather(agent_task, return_exceptions=True)
             raise
+
+        conversation = await repository.append_turn(
+            conversation_id,
+            context.identity.user_id,
+            payload.message,
+            result.answer,
+            result.evidence_ids,
+        )
+        yield _sse(
+            "activity",
+            _activity(
+                event_type=ActivityEventType.MEMORY_UPDATED,
+                request_id=request_id,
+                conversation_id=conversation_id,
+                status=ActivityStatus.COMPLETED,
+                message="Saved the conversation turn and evidence references.",
+                node="conversation_memory",
+                metadata={"message_count": len(conversation.messages)},
+            ),
+        )
 
         yield _sse(
             "activity",
@@ -262,9 +305,15 @@ async def stream_chat(
     settings: SettingsDependency,
     context: TrustedChatContextDependency,
     orchestrator: RootOrchestratorDependency,
+    repository: ConversationRepositoryDependency,
 ) -> EventSourceResponse:
+    conversation = await repository.get_or_create(
+        payload.conversation_id or uuid4(), context.identity.user_id
+    )
     return EventSourceResponse(
-        stream_chat_events(request, payload, settings, context, orchestrator),
+        stream_chat_events(
+            request, payload, settings, context, orchestrator, repository, conversation
+        ),
         ping=15,
         headers={
             "Cache-Control": "no-cache, no-transform",

@@ -102,9 +102,20 @@ def login(username: str, password: str) -> dict[str, Any]:
     return response.json()
 
 
+def load_conversation(conversation_id: str) -> list[dict[str, str]]:
+    with httpx.Client(timeout=httpx.Timeout(15, connect=5)) as client:
+        response = client.get(
+            f"{API_BASE_URL}/v1/conversations/{conversation_id}",
+            headers={"Authorization": f"Bearer {st.session_state.access_token}"},
+        )
+    if response.is_error:
+        raise RuntimeError("Conversation memory could not be loaded")
+    return response.json().get("messages", [])
+
+
 st.set_page_config(page_title="Commercial Bank AI Assistant", page_icon="🏦", layout="wide")
 st.title("Commercial Bank AI Assistant")
-st.caption("Phase 1 walking skeleton · streamed mock response with inspectable activity")
+st.caption("Phase 6 · grounded multi-turn assistant with inspectable agent and tool activity")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -116,6 +127,16 @@ if "access_token" not in st.session_state:
     st.session_state.access_token = None
 if "identity" not in st.session_state:
     st.session_state.identity = None
+
+if (
+    st.session_state.access_token
+    and st.session_state.conversation_id
+    and not st.session_state.messages
+):
+    try:
+        st.session_state.messages = load_conversation(st.session_state.conversation_id)
+    except (httpx.HTTPError, RuntimeError, json.JSONDecodeError):
+        st.session_state.messages = []
 
 if not st.session_state.access_token:
     st.subheader("Sign in")

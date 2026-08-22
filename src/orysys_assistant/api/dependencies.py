@@ -14,6 +14,8 @@ from orysys_assistant.domain.errors import (
     RateLimitError,
     RateLimitUnavailableError,
 )
+from orysys_assistant.memory.repository import ConversationRepository
+from orysys_assistant.memory.runtime import MemoryRuntime
 from orysys_assistant.observability.logging import get_logger
 from orysys_assistant.retrieval.runtime import AgentRuntimeManager
 from orysys_assistant.security.access_scope import AccessScopeService
@@ -61,6 +63,17 @@ async def get_root_orchestrator(request: Request) -> RootOrchestrator:
 
 
 RootOrchestratorDependency = Annotated[RootOrchestrator, Depends(get_root_orchestrator)]
+
+
+async def get_conversation_repository(request: Request) -> ConversationRepository:
+    runtime = cast(MemoryRuntime, request.app.state.memory_runtime)
+    await runtime.start()
+    return runtime.repository
+
+
+ConversationRepositoryDependency = Annotated[
+    ConversationRepository, Depends(get_conversation_repository)
+]
 
 
 def get_current_identity(
