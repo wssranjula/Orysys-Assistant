@@ -28,14 +28,20 @@ accidentally supplies them.
 
 ## Trace tree
 
-The API establishes a LangSmith tracing context before creating the root-agent task. Dynamic
-metadata includes request ID, conversation ID, role, and root agent. The context propagates through
-the root agent's own loop, each delegation tool, the delegated specialist's tool-calling loop,
-authorization decisions, Tool Gateway, hybrid retrieval, MCP adapter, and output validator.
+The API publishes a top-level `chat-request` LangSmith run for every streamed request.
+That run carries request ID, conversation ID, role, route, validation outcome, evidence count,
+and duration in metadata and tags. A nested tracing context propagates the same identifiers
+through the root agent loop, each delegation tool, delegated specialists, authorization decisions,
+Tool Gateway, hybrid retrieval, MCP adapter, and output validator.
 
-Tool invocations add tool name and role metadata. Static trace metadata identifies agent,
-subagent, graph node, transport, and deterministic security controls. Structured JSON logs use the
-same request-scoped identifiers, allowing local correlation when LangSmith is disabled.
+Tool invocations add tool name and role metadata plus searchable tags. Static trace metadata
+identifies agent, subagent, graph node, transport, and deterministic security controls.
+Structured JSON logs use the same request-scoped identifiers, allowing local correlation when
+LangSmith is disabled.
+
+LangGraph middleware spans (todo lists, call limits) also appear in LangSmith. Filter by
+`chat-request`, `delegate-*`, `hybrid-knowledge-retrieval`, or `output-validation` to focus
+on application-level spans.
 
 ## Golden evaluation
 

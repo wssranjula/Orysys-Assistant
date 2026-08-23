@@ -309,6 +309,8 @@ async def test_chat_stream_uses_explicit_langsmith_configuration(
 
     monkeypatch.setattr(chat_routes, "get_langsmith_client", fake_client_factory)
     monkeypatch.setattr(chat_routes, "tracing_context", fake_tracing_context)
+    monkeypatch.setattr(chat_routes, "start_chat_request_trace", lambda **_kwargs: None)
+    monkeypatch.setattr(chat_routes, "finish_chat_request_trace", lambda *_args, **_kwargs: None)
 
     response = await client.post(
         "/v1/chat/stream",

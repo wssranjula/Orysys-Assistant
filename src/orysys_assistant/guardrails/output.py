@@ -40,7 +40,7 @@ class OutputValidator:
     """Validate current-request evidence and permit one marker-only repair attempt."""
 
     @traceable(
-        name="deterministic-output-validation",
+        name="output-validation",
         run_type="chain",
         metadata={"control": "citation_and_brand_validation", "phase": 7},
     )

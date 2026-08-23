@@ -130,7 +130,8 @@ class ToolGateway:
                 "tool_name": tool_name,
                 "role": context.identity.role.value,
                 "agent_name": "tool_gateway",
-            }
+            },
+            tags=[tool_name, context.identity.role.value],
         ):
             result = await self._invoke(spec, validated, context)
 
