@@ -7,6 +7,7 @@ RBAC check, and the returned evidence, citations, and analysis figures are rebui
 the collector's record of executed calls rather than from anything the model wrote.
 """
 
+import asyncio
 from typing import Any
 
 from langchain.agents import create_agent
@@ -79,7 +80,9 @@ class KnowledgeSubagent:
         *,
         max_tool_calls: int = 6,
         max_model_calls: int = 5,
+        overall_timeout_seconds: float = 45,
     ) -> None:
+        self._overall_timeout_seconds = overall_timeout_seconds
         self._agent = create_agent(
             model=model,
             tools=build_gateway_tools(toolbox),
@@ -104,7 +107,13 @@ class KnowledgeSubagent:
     ) -> SpecialistOutcome:
         collector = SpecialistCollector()
         report = await _run_agent(
-            self._agent, question, context, collector, self.name, transition_sink
+            self._agent,
+            question,
+            context,
+            collector,
+            self.name,
+            transition_sink,
+            self._overall_timeout_seconds,
         )
         evidence = collector.ordered_evidence()
         warnings = list(collector.warnings)
@@ -130,7 +139,9 @@ class AnalysisSubagent:
         *,
         max_tool_calls: int = 8,
         max_model_calls: int = 6,
+        overall_timeout_seconds: float = 45,
     ) -> None:
+        self._overall_timeout_seconds = overall_timeout_seconds
         self._agent = create_agent(
             model=model,
             tools=build_gateway_tools(toolbox),
@@ -155,7 +166,13 @@ class AnalysisSubagent:
     ) -> SpecialistOutcome:
         collector = SpecialistCollector()
         report = await _run_agent(
-            self._agent, question, context, collector, self.name, transition_sink
+            self._agent,
+            question,
+            context,
+            collector,
+            self.name,
+            transition_sink,
+            self._overall_timeout_seconds,
         )
         evidence = collector.ordered_evidence()
         warnings = list(collector.warnings)
@@ -185,7 +202,9 @@ class EnterpriseToolSubagent:
         *,
         max_tool_calls: int = 6,
         max_model_calls: int = 5,
+        overall_timeout_seconds: float = 45,
     ) -> None:
+        self._overall_timeout_seconds = overall_timeout_seconds
         self._agent = create_agent(
             model=model,
             tools=build_gateway_tools(toolbox),
@@ -210,7 +229,13 @@ class EnterpriseToolSubagent:
     ) -> SpecialistOutcome:
         collector = SpecialistCollector()
         report = await _run_agent(
-            self._agent, question, context, collector, self.name, transition_sink
+            self._agent,
+            question,
+            context,
+            collector,
+            self.name,
+            transition_sink,
+            self._overall_timeout_seconds,
         )
         records = _enterprise_records(collector)
         return SpecialistOutcome(
@@ -227,17 +252,26 @@ async def _run_agent(
     collector: SpecialistCollector,
     agent_name: str,
     transition_sink: TransitionSink | None,
+    overall_timeout_seconds: float,
 ) -> str:
     """Run one specialist loop and return its prose, with tool traffic in the collector."""
-    state = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": question}]},
-        context=SpecialistContext(
-            request_context=request_context,
-            collector=collector,
-            agent_name=agent_name,
-            transition_sink=transition_sink,
-        ),
+    specialist_context = SpecialistContext(
+        request_context=request_context,
+        collector=collector,
+        agent_name=agent_name,
+        transition_sink=transition_sink,
     )
+    try:
+        async with asyncio.timeout(overall_timeout_seconds):
+            state = await agent.ainvoke(
+                {"messages": [{"role": "user", "content": question}]},
+                context=specialist_context,
+            )
+    except TimeoutError:
+        collector.add_warning(
+            f"The {agent_name.replace('_', ' ')} reached its execution time limit."
+        )
+        return final_text({"messages": []})
     return final_text(state)
 
 

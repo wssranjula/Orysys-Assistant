@@ -21,6 +21,7 @@ from orysys_assistant.api.routes import (
 from orysys_assistant.config import Settings, get_settings
 from orysys_assistant.guardrails.input import InputGuard
 from orysys_assistant.guardrails.output import OutputValidator
+from orysys_assistant.memory.feedback_repository import InMemoryFeedbackRepository
 from orysys_assistant.memory.runtime import MemoryRuntime
 from orysys_assistant.observability.logging import configure_logging, get_logger
 from orysys_assistant.retrieval.runtime import AgentRuntimeManager
@@ -52,6 +53,7 @@ def create_app(
     incident_write_store = DummyIncidentWriteStore()
     tool_gateway.register(modify_incident_spec(incident_write_store))
     memory_runtime = MemoryRuntime(resolved_settings)
+    feedback_repository = InMemoryFeedbackRepository()
     approval_service = ApprovalService(
         tool_gateway,
         resolved_settings.database_url if resolved_settings.memory_backend == "postgres" else None,
@@ -93,6 +95,7 @@ def create_app(
     app.state.tool_gateway = tool_gateway
     app.state.agent_runtime = agent_runtime
     app.state.memory_runtime = memory_runtime
+    app.state.feedback_repository = feedback_repository
     app.state.approval_service = approval_service
     app.state.incident_write_store = incident_write_store
     app.state.input_guard = InputGuard()

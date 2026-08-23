@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import InvalidRequestError
 from orysys_assistant.memory.runtime import MemoryRuntime
-from orysys_assistant.retrieval.chunking import SectionAwareChunker
+from orysys_assistant.retrieval.chunking import build_chunker
 from orysys_assistant.retrieval.embeddings import (
     DeterministicHashEmbedding,
     OpenAIEmbeddingProvider,
@@ -65,7 +65,13 @@ async def _build_memory_runtime(settings: Settings, root: Path) -> RetrievalRunt
         manifest_path=manifest_path,
         namespace=settings.pinecone_namespace,
         parser=MarkdownDocumentParser(corpus),
-        chunker=SectionAwareChunker(settings.organization_id),
+        chunker=build_chunker(
+            settings.organization_id,
+            target_tokens=settings.chunk_target_tokens,
+            max_tokens=settings.chunk_max_tokens,
+            overlap_tokens=settings.chunk_overlap_tokens,
+            merge_sections=settings.chunk_merge_sections,
+        ),
         embeddings=embeddings,
         vector_store=vector_store,
     ).run()

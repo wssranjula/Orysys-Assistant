@@ -11,7 +11,7 @@ from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import InvalidRequestError, RetrievalUnavailableError
 from orysys_assistant.domain.models import Role
-from orysys_assistant.retrieval.chunking import SectionAwareChunker
+from orysys_assistant.retrieval.chunking import SectionAwareChunker, build_chunker
 from orysys_assistant.retrieval.embeddings import DeterministicHashEmbedding
 from orysys_assistant.retrieval.ingestion import IngestionPipeline
 from orysys_assistant.retrieval.models import (
@@ -19,6 +19,7 @@ from orysys_assistant.retrieval.models import (
     IngestionManifest,
     ParsedDocument,
     SearchFilters,
+    SearchMatch,
     SparseVector,
 )
 from orysys_assistant.retrieval.parsing import MarkdownDocumentParser
@@ -50,12 +51,19 @@ async def build_retrieval(tmp_path: Path) -> tuple[RetrievalService, InMemoryVec
     store = InMemoryVectorStore()
     embeddings = DeterministicHashEmbedding(dimension=256)
     manifest_path = tmp_path / "manifest.json"
+    settings = Settings(_env_file=None)
     pipeline = IngestionPipeline(
         corpus_root=CORPUS_ROOT,
         manifest_path=manifest_path,
         namespace="commercial-bank",
         parser=MarkdownDocumentParser(CORPUS_ROOT),
-        chunker=SectionAwareChunker("commercial-bank"),
+        chunker=build_chunker(
+            settings.organization_id,
+            target_tokens=settings.chunk_target_tokens,
+            max_tokens=settings.chunk_max_tokens,
+            overlap_tokens=settings.chunk_overlap_tokens,
+            merge_sections=settings.chunk_merge_sections,
+        ),
         embeddings=embeddings,
         vector_store=store,
     )
@@ -130,7 +138,11 @@ def test_section_chunking_is_bounded_overlapping_and_deterministic() -> None:
         sections=(DocumentSection(heading="Large section", content="word " * 2_000),),
     )
     chunker = SectionAwareChunker(
-        "commercial-bank", target_tokens=650, max_tokens=800, overlap_tokens=80
+        "commercial-bank",
+        target_tokens=650,
+        max_tokens=800,
+        overlap_tokens=80,
+        merge_sections=True,
     )
 
     first = chunker.chunk(document)
@@ -162,8 +174,9 @@ async def test_reingestion_upserts_same_ids_without_duplicates(tmp_path: Path) -
     second = await pipeline.run()
 
     assert first.documents == second.documents == 48
-    assert first.chunks == second.chunks == 48
-    assert store.count("commercial-bank") == 48
+    assert first.chunks == second.chunks
+    assert first.chunks > 48
+    assert store.count("commercial-bank") == first.chunks
     assert store.count("another-namespace") == 0
     assert second.deleted_stale == 0
 
@@ -275,7 +288,11 @@ async def test_hard_control_audit_reaches_all_expected_multi_source_evidence(
         tool_turn(
             (
                 "knowledge_search",
-                {"query": "Orion readiness controls reported complete", "top_k": 8},
+                {
+                    "query": "Project Orion readiness connection budget controls reported complete",
+                    "document_type": "meeting_note",
+                    "top_k": 8,
+                },
             ),
             (
                 "knowledge_search",
@@ -330,6 +347,33 @@ async def test_filters_narrow_scope_and_never_broaden_it(tmp_path: Path) -> None
     assert all(item.metadata["created_date"] >= "2025-05-01" for item in incidents)
     assert all(isinstance(item.metadata["created_date_ordinal"], int) for item in incidents)
     assert forbidden_department == []
+
+
+def test_hybrid_sparse_floor_keeps_dense_only_candidates() -> None:
+    metadata = {
+        "document_id": "doc-1",
+        "title": "Policy",
+        "content": "Remote work is permitted.",
+        "page_number": -1,
+    }
+    service = RetrievalService(
+        vector_store=InMemoryVectorStore(),
+        embeddings=DeterministicHashEmbedding(dimension=256),
+        sparse_encoder=BM25SparseEncoder(),
+        minimum_sparse_score=0.1,
+        reranker=None,
+    )
+    dense_only = SearchMatch(id="dense-only", score=0.9, metadata=dict(metadata))
+    sparse_weak = SearchMatch(id="sparse-weak", score=0.05, metadata=dict(metadata))
+    combined = service._combine([dense_only], [sparse_weak])
+    filtered = [
+        item
+        for item in combined
+        if item.sparse_score is None or item.sparse_score >= service._minimum_sparse_score
+    ]
+
+    assert any(item.chunk_id == "dense-only" for item in filtered)
+    assert not any(item.chunk_id == "sparse-weak" for item in filtered)
 
 
 @pytest.mark.asyncio

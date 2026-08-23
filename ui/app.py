@@ -41,7 +41,9 @@ def render_activity(events: list[dict[str, Any]], placeholder: Any) -> None:
     with placeholder.container():
         if panel.degraded:
             st.warning("This request is operating in partial or degraded mode.")
-        st.caption(f"Trace ID: `{panel.trace_id}`")
+        st.caption(f"Request ID: `{panel.request_id}`")
+        if panel.langsmith_run_id:
+            st.caption(f"LangSmith run: `{panel.langsmith_run_id}`")
         agent_column, node_column = st.columns(2)
         agent_column.caption("Current agent")
         agent_column.markdown(f"**{panel.current_agent.replace('_', ' ').title()}**")
@@ -96,6 +98,7 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
         payload["conversation_id"] = st.session_state.conversation_id
 
     answer = ""
+    answer_is_provisional = False
     final_response: dict[str, Any] = {}
     with (
         httpx.Client(timeout=httpx.Timeout(130, connect=5)) as client,
@@ -116,11 +119,18 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
                 render_activity(st.session_state.activities, activity_placeholder)
             elif event_name == "answer_delta":
                 answer += event["text"]
-                answer_placeholder.markdown(answer + "▌")
+                answer_is_provisional = bool(event.get("provisional", False))
                 st.session_state.conversation_id = event["conversation_id"]
+                draft_note = (
+                    "\n\n> Draft answer — validating before the final response."
+                    if answer_is_provisional
+                    else ""
+                )
+                answer_placeholder.markdown(f"{answer}{draft_note} ▌")
             elif event_name == "final":
                 final_response = event
                 answer = event["answer"]
+                answer_is_provisional = False
                 st.session_state.conversation_id = event["conversation_id"]
                 if event.get("warnings"):
                     warning = " · ".join(event["warnings"])

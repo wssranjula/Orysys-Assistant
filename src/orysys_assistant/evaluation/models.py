@@ -62,6 +62,6 @@ class GoldenEvaluationReport(EvaluationModel):
     schema_version: str = "1.0"
     generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     corpus: str = "data/golden_questions.json"
-    runtime: str = "offline deterministic API with explicit fault injection"
+    runtime: str = "live agent loops via API with explicit fault injection where noted"
     metrics: EvaluationMetrics
     results: list[GoldenCaseResult]

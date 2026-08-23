@@ -330,26 +330,31 @@ async def test_chat_stream_uses_explicit_langsmith_configuration(
 @pytest.mark.asyncio
 async def test_placeholder_conversation_and_feedback_contracts(
     client: httpx.AsyncClient,
+    app: Any,
 ) -> None:
     conversation_id = uuid4()
+    response_id = uuid4()
     conversation = await client.get(f"/v1/conversations/{conversation_id}", headers=auth_headers())
     feedback = await client.post(
         "/v1/feedback",
         json={
             "conversation_id": str(conversation_id),
-            "response_id": str(uuid4()),
+            "response_id": str(response_id),
             "rating": 1,
+            "comment": "Helpful answer",
         },
         headers=auth_headers(),
     )
+    stored = await app.state.feedback_repository.list_for_user("user-viewer-01")
 
     assert conversation.status_code == 200
     assert conversation.json()["persistence"] == "in_memory"
     assert feedback.status_code == 202
     assert feedback.json() == {
         "accepted": True,
-        "persistence": "not_available_in_phase_1",
+        "persistence": "in_memory",
     }
+    assert any(item.response_id == response_id and item.rating == 1 for item in stored)
 
 
 @pytest.mark.asyncio

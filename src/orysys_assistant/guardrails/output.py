@@ -14,6 +14,12 @@ _HIDDEN_REASONING = re.compile(
     r"<\/?(?:thinking|analysis)>|\b(?:hidden )?chain[- ]of[- ]thought\b|\bsystem prompt\b",
     re.I,
 )
+_BRAND_POLICY = re.compile(
+    r"\bas an ai language model\b|"
+    r"\bi(?:'m| am) just an ai\b|"
+    r"\bi(?:'m| am) not (?:a )?commercial bank\b",
+    re.I,
+)
 _GROUNDING_ROUTES = frozenset(
     {AgentRoute.DIRECT_KNOWLEDGE, AgentRoute.RESEARCH, AgentRoute.ANALYSIS}
 )
@@ -62,6 +68,8 @@ class OutputValidator:
             return "The response answer was empty."
         if _HIDDEN_REASONING.search(result.answer):
             return "The response contained protected instruction or reasoning text."
+        if _BRAND_POLICY.search(result.answer):
+            return "The response did not follow Commercial Bank assistant brand policy."
         if result.route not in _GROUNDING_ROUTES:
             return None
         if not result.evidence:

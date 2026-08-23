@@ -51,6 +51,16 @@ router = APIRouter(prefix="/v1/chat", tags=["chat"])
 logger = get_logger()
 
 
+def _langsmith_run_id() -> str | None:
+    try:
+        from langsmith.run_helpers import get_current_run_tree
+
+        run = get_current_run_tree()
+        return str(run.id) if run is not None and run.id is not None else None
+    except Exception:
+        return None
+
+
 class ClientDisconnectedError(Exception):
     """Internal control-flow signal; never exposed as a server error."""
 
@@ -192,16 +202,30 @@ async def stream_chat_events(
                 "agent_name": orchestrator.name,
             },
         ):
+            run_id = _langsmith_run_id()
+            if run_id:
+                yield _sse(
+                    "activity",
+                    _activity(
+                        event_type=ActivityEventType.REQUEST_RECEIVED,
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        status=ActivityStatus.COMPLETED,
+                        message="LangSmith tracing is active for this request.",
+                        node="tracing",
+                        metadata={"langsmith_run_id": run_id},
+                    ),
+                )
             stream_method = getattr(orchestrator, "stream", None)
             if stream_method is not None:
                 result = None
-                async with asyncio.timeout(settings.request_timeout_seconds):
-                    async for update in stream_method(
+                async for update in stream_method(
                         payload.message,
                         context,
                         conversation.summary,
                         f"{context.identity.user_id}:{conversation_id}",
                         preference_context,
+                        timeout_seconds=settings.request_timeout_seconds,
                     ):
                         await _ensure_connected(request)
                         if isinstance(update, AgentTransition):

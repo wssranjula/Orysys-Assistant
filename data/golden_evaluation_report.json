@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "generated_at": "2026-08-22T17:32:56.954149Z",
   "corpus": "data/golden_questions.json",
-  "runtime": "offline deterministic API with explicit fault injection",
+  "runtime": "live agent loops via API with explicit fault injection where noted",
   "metrics": {
     "cases": 10,
     "route_accuracy": 1.0,

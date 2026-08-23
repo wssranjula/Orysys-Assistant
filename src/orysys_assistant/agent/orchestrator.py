@@ -16,6 +16,7 @@ describes observed work rather than anything the model claimed about its own wor
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -299,12 +300,18 @@ class RootOrchestrator:
         conversation_summary: str = "",
         thread_id: str | None = None,
         long_term_memory: str = "",
+        timeout_seconds: float | None = None,
     ) -> AsyncIterator[AgentTransition | AnswerToken | AgentExecutionResult]:
         """Stream activity and the root's own answer tokens, then the typed result."""
 
         ledger = DelegationLedger()
         yield _started_transition()
-        answer = ""
+        deadline = monotonic() + timeout_seconds if timeout_seconds is not None else None
+        ordered_message_ids: list[str] = []
+        message_text: dict[str, str] = {}
+        tool_call_message_ids: set[str] = set()
+        delegation_seen = False
+
         async for mode, part in self.graph.astream(
             self._input(
                 question,
@@ -322,14 +329,33 @@ class RootOrchestrator:
             ),
             stream_mode=["custom", "messages"],
         ):
+            if deadline is not None and monotonic() >= deadline:
+                yield _timeout_result(
+                    _final_root_answer(message_text, ordered_message_ids, tool_call_message_ids),
+                    ledger,
+                )
+                return
             if mode == "custom":
                 yield AgentTransition.model_validate(part)
                 continue
-            text = _chunk_text(part)
-            if text:
-                answer += text
-                yield AnswerToken(text=text)
-        yield _result(answer.strip(), ledger)
+            chunk = _parse_root_model_chunk(part)
+            if chunk is None or not chunk.text:
+                if chunk is not None and chunk.has_tool_calls:
+                    tool_call_message_ids.add(chunk.message_id)
+                    delegation_seen = True
+                continue
+            if chunk.message_id not in message_text:
+                ordered_message_ids.append(chunk.message_id)
+            message_text[chunk.message_id] = message_text.get(chunk.message_id, "") + chunk.text
+            if chunk.has_tool_calls:
+                tool_call_message_ids.add(chunk.message_id)
+                delegation_seen = True
+            if chunk.message_id in tool_call_message_ids:
+                continue
+            if delegation_seen:
+                yield AnswerToken(text=chunk.text)
+        answer = _final_root_answer(message_text, ordered_message_ids, tool_call_message_ids)
+        yield _result(answer, ledger)
 
     async def _started(self, sink: TransitionSink | None) -> None:
         await _publish(sink, _started_transition())
@@ -581,29 +607,75 @@ def _subagent_transition(agent: str, status: str) -> AgentTransition:
     )
 
 
-def _chunk_text(part: Any) -> str:
-    """Read the root's own answer text out of one streamed message chunk.
+@dataclass(frozen=True, slots=True)
+class _RootModelChunk:
+    text: str
+    message_id: str
+    has_tool_calls: bool
+
+
+def _parse_root_model_chunk(part: Any) -> _RootModelChunk | None:
+    """Read one streamed chunk from the root model node.
 
     Specialist loops run inside a delegation tool, so their prose arrives tagged with the
     tool node. Filtering on the root's model node is what keeps a specialist's internal
-    reasoning out of the answer the user sees.
+    reasoning out of the answer the user sees. Messages that include tool calls are
+    planning turns rather than the final answer, so their narration is excluded.
     """
 
     if not isinstance(part, tuple) or len(part) != 2:
-        return ""
+        return None
     chunk, metadata = part
     if not isinstance(metadata, dict) or metadata.get("langgraph_node") != "model":
-        return ""
+        return None
+    message_id = getattr(chunk, "id", None)
+    if not message_id:
+        message_id = metadata.get("checkpoint_ns") or metadata.get("langgraph_step")
+    if not isinstance(message_id, str) or not message_id:
+        message_id = "root-model"
+    tool_calls = getattr(chunk, "tool_calls", None) or []
+    invalid_tool_calls = getattr(chunk, "invalid_tool_calls", None) or []
+    has_tool_calls = bool(tool_calls or invalid_tool_calls)
     content = getattr(chunk, "content", None)
     if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
+        text = content
+    elif isinstance(content, list):
+        text = "".join(
             str(block.get("text", ""))
             for block in content
             if isinstance(block, dict) and block.get("type") in {"text", None}
         )
+    else:
+        text = ""
+    if not text and not has_tool_calls:
+        return None
+    return _RootModelChunk(text=text, message_id=message_id, has_tool_calls=has_tool_calls)
+
+
+def _final_root_answer(
+    message_text: dict[str, str],
+    ordered_message_ids: list[str],
+    tool_call_message_ids: set[str],
+) -> str:
+    """Keep the last root model message that was prose rather than a tool-planning turn."""
+
+    for message_id in reversed(ordered_message_ids):
+        if message_id in tool_call_message_ids:
+            continue
+        text = message_text.get(message_id, "").strip()
+        if text:
+            return text
     return ""
+
+
+def _timeout_result(answer: str, ledger: DelegationLedger) -> AgentExecutionResult:
+    """Return the best available turn when the request deadline is reached."""
+
+    warnings = [*ledger.warnings, "The request reached its execution time limit before completing."]
+    result = _result(answer.strip(), ledger)
+    if result.status is ResponseStatus.COMPLETE:
+        return result.model_copy(update={"status": ResponseStatus.PARTIAL, "warnings": warnings})
+    return result.model_copy(update={"warnings": warnings})
 
 
 def _with_conversation_context(question: str, summary: str) -> str:

@@ -40,7 +40,7 @@ def context(role: Role) -> TrustedRequestContext:
 
 @pytest.mark.asyncio
 async def test_memory_is_owner_isolated_and_stores_only_compact_turn_data() -> None:
-    repository = InMemoryConversationRepository(max_messages=4, max_summary_characters=120)
+    repository = InMemoryConversationRepository(max_messages=20, max_summary_characters=80)
     conversation_id = uuid4()
     await repository.get_or_create(conversation_id, "owner-1")
     record = await repository.append_turn(
@@ -53,7 +53,21 @@ async def test_memory_is_owner_isolated_and_stores_only_compact_turn_data() -> N
 
     assert [message.role for message in record.messages] == ["user", "assistant"]
     assert record.evidence_ids == ["ev_1", "ev_2"]
-    assert len(record.summary) <= 120
+    assert len(record.summary) <= 80
+    assert "earlier turn(s) omitted" not in record.summary
+
+    for index in range(8):
+        record = await repository.append_turn(
+            conversation_id,
+            "owner-1",
+            f"Question {index}",
+            f"Answer {index}",
+            [],
+        )
+
+    assert "earlier turn(s) omitted" in record.summary
+    assert record.summary.endswith("Answer 7")
+    assert "Question 0" not in record.summary
     assert "token" not in record.model_dump_json().lower()
     with pytest.raises(AuthorizationError):
         await repository.get(conversation_id, "owner-2")

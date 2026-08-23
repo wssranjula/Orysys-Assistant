@@ -12,6 +12,23 @@ def token_count(text: str) -> int:
     return len(re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE))
 
 
+def build_chunker(
+    organization: str,
+    *,
+    target_tokens: int = 650,
+    max_tokens: int = 800,
+    overlap_tokens: int = 80,
+    merge_sections: bool = False,
+) -> "SectionAwareChunker":
+    return SectionAwareChunker(
+        organization,
+        target_tokens=target_tokens,
+        max_tokens=max_tokens,
+        overlap_tokens=overlap_tokens,
+        merge_sections=merge_sections,
+    )
+
+
 class SectionAwareChunker:
     def __init__(
         self,
@@ -20,6 +37,7 @@ class SectionAwareChunker:
         target_tokens: int = 650,
         max_tokens: int = 800,
         overlap_tokens: int = 80,
+        merge_sections: bool = False,
     ) -> None:
         if not 0 <= overlap_tokens < max_tokens:
             raise ValueError("overlap_tokens must be smaller than max_tokens")
@@ -27,6 +45,7 @@ class SectionAwareChunker:
         self._target_tokens = target_tokens
         self._max_tokens = max_tokens
         self._overlap_tokens = overlap_tokens
+        self._merge_sections = merge_sections
 
     def chunk(self, document: ParsedDocument) -> list[DocumentChunk]:
         blocks: list[tuple[str, str]] = []
@@ -38,19 +57,22 @@ class SectionAwareChunker:
                 blocks.extend(self._split_oversized(section.heading, section.content))
 
         grouped: list[tuple[list[str], list[str]]] = []
-        headings: list[str] = []
-        contents: list[str] = []
-        current_tokens = 0
-        for heading, content in blocks:
-            size = token_count(content)
-            if contents and current_tokens + size > self._target_tokens:
+        if self._merge_sections:
+            headings: list[str] = []
+            contents: list[str] = []
+            current_tokens = 0
+            for heading, content in blocks:
+                size = token_count(content)
+                if contents and current_tokens + size > self._target_tokens:
+                    grouped.append((headings, contents))
+                    headings, contents, current_tokens = [], [], 0
+                headings.append(heading)
+                contents.append(content)
+                current_tokens += size
+            if contents:
                 grouped.append((headings, contents))
-                headings, contents, current_tokens = [], [], 0
-            headings.append(heading)
-            contents.append(content)
-            current_tokens += size
-        if contents:
-            grouped.append((headings, contents))
+        else:
+            grouped = [([heading], [content]) for heading, content in blocks]
 
         chunks = []
         for index, (chunk_headings, chunk_contents) in enumerate(grouped):

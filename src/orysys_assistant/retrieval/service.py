@@ -93,10 +93,12 @@ class RetrievalService:
         evidence = self._combine(dense_matches, sparse_matches)
         if not sparse_degraded:
             evidence = [
-                item for item in evidence if (item.sparse_score or 0) >= self._minimum_sparse_score
+                item
+                for item in evidence
+                if item.sparse_score is None or item.sparse_score >= self._minimum_sparse_score
             ]
         evidence = (
-            self._reranker.rerank(query, evidence, top_k)
+            await asyncio.to_thread(self._reranker.rerank, query, evidence, top_k)
             if self._reranker is not None
             else evidence[:top_k]
         )

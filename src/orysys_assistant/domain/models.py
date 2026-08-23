@@ -190,7 +190,7 @@ class FeedbackRequest(StrictModel):
 
 class FeedbackAcknowledgement(StrictModel):
     accepted: bool
-    persistence: str = "not_available_in_phase_1"
+    persistence: str = "in_memory"
 
 
 class HealthResponse(StrictModel):

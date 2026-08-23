@@ -644,3 +644,61 @@ async def test_citation_markers_are_assigned_by_the_ledger_not_the_specialist() 
     assert [item.citation_id for item in result.citations] == ["1"]
     assert result.citations[0].evidence_id == "ev_handoff_fixture"
     assert OutputValidator().validate(result, request_context.access_scope).valid is True
+
+
+def narrating_delegation(request: str = "Find the remote working policy.") -> Any:
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content="Let me check the policy corpus for you.",
+        tool_calls=[
+            {
+                "name": "consult_knowledge_specialist",
+                "args": {"request": request},
+                "id": "call_root_1",
+            }
+        ],
+        id="root-msg-1",
+    )
+
+
+def root_answer_turn(content: str) -> Any:
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(content=content, id="root-msg-2")
+
+
+@pytest.mark.asyncio
+async def test_stream_and_run_agree_when_the_root_narrates_before_delegating() -> None:
+    """Narration on a tool-planning turn must not become the streamed or persisted answer."""
+
+    gateway, runtime = await corpus_gateway(Path(__file__).parents[2])
+    script = [
+        narrating_delegation(),
+        tool_turn(("knowledge_search", {"query": "remote working policy"})),
+        text_turn("Specialist internal note."),
+        root_answer_turn("Remote work is permitted for approved roles [1]."),
+    ]
+    request_context = context(Role.ANALYST)
+    try:
+        run_result = await corpus_orchestrator(
+            gateway, scripted_model(*script)
+        ).run("What is the remote working policy?", request_context)
+        stream_updates = [
+            update
+            async for update in corpus_orchestrator(
+                gateway, scripted_model(*script)
+            ).stream("What is the remote working policy?", request_context)
+        ]
+    finally:
+        await runtime.close()
+
+    tokens = "".join(item.text for item in stream_updates if isinstance(item, AnswerToken))
+    stream_result = next(item for item in stream_updates if isinstance(item, AgentExecutionResult))
+    expected = "Remote work is permitted for approved roles [1]."
+
+    assert run_result.answer == expected
+    assert stream_result.answer == expected
+    assert tokens == expected
+    assert "Let me check" not in tokens
+    assert "policy corpus" not in tokens

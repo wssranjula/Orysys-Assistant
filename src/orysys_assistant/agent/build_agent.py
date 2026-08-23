@@ -61,6 +61,7 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
         model,
         max_tool_calls=settings.specialist_max_tool_calls,
         max_model_calls=settings.specialist_max_model_calls,
+        overall_timeout_seconds=settings.specialist_overall_timeout_seconds,
     )
     research = ResearchSubagent(
         ScopedToolbox(gateway, frozenset({"knowledge_search"})),
@@ -73,12 +74,14 @@ def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator
         model,
         max_tool_calls=settings.specialist_max_tool_calls + 2,
         max_model_calls=settings.specialist_max_model_calls + 1,
+        overall_timeout_seconds=settings.specialist_overall_timeout_seconds,
     )
     enterprise = EnterpriseToolSubagent(
         ScopedToolbox(gateway, ENTERPRISE_TOOLS),
         model,
         max_tool_calls=settings.specialist_max_tool_calls,
         max_model_calls=settings.specialist_max_model_calls,
+        overall_timeout_seconds=settings.specialist_overall_timeout_seconds,
     )
 
     return RootOrchestrator(
