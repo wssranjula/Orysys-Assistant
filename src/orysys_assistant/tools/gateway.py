@@ -41,6 +41,9 @@ class ToolSpec:
     timeout_seconds: float = 10
     max_result_bytes: int = 100_000
     retry_attempts: int = 0
+    description: str = ""
+    """Model-facing purpose. The registration owns it so the schema a specialist sees
+    and the schema the gateway validates can never drift apart."""
 
 
 class ToolGateway:
@@ -56,6 +59,17 @@ class ToolGateway:
         if spec.name in self._tools:
             raise ValueError(f"Tool is already registered: {spec.name}")
         self._tools[spec.name] = spec
+
+    def spec(self, tool_name: str) -> ToolSpec:
+        """Expose a registration so agents can publish its schema to a model.
+
+        Read-only by construction: ``ToolSpec`` is frozen, and holding one grants no
+        ability to execute. Every call still goes through :meth:`execute`.
+        """
+        spec = self._tools.get(tool_name)
+        if spec is None:
+            raise InvalidRequestError("The requested tool is not registered.")
+        return spec
 
     @staticmethod
     def _forbidden_keys(value: Any) -> set[str]:

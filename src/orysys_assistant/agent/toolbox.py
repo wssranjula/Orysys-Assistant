@@ -2,9 +2,9 @@
 
 from typing import Any
 
-from orysys_assistant.domain.errors import AuthorizationError
+from orysys_assistant.domain.errors import AuthorizationError, InvalidRequestError
 from orysys_assistant.security.models import TrustedRequestContext
-from orysys_assistant.tools.gateway import ToolGateway
+from orysys_assistant.tools.gateway import ToolGateway, ToolSpec
 
 
 class ScopedToolbox:
@@ -15,6 +15,20 @@ class ScopedToolbox:
     @property
     def allowed_tools(self) -> frozenset[str]:
         return self._allowed_tools
+
+    def specs(self) -> list[ToolSpec]:
+        """Registrations this agent may expose to a model, in stable order.
+
+        Unregistered names are skipped rather than raising so a specialist can declare
+        an optional tool surface that a lean deployment profile has not registered.
+        """
+        specs: list[ToolSpec] = []
+        for name in sorted(self._allowed_tools):
+            try:
+                specs.append(self._gateway.spec(name))
+            except InvalidRequestError:
+                continue
+        return specs
 
     async def execute(
         self,

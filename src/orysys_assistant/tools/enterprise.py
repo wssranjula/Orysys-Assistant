@@ -55,6 +55,37 @@ class EnterpriseToolHandler:
         )
 
 
+ENTERPRISE_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "get_employee": (
+        "Fetch one employee record from the directory by exact identifier, formatted "
+        "EMP-000. Returns name, role, department, and contact details. Use "
+        "search_employees first when you only have a name."
+    ),
+    "search_employees": (
+        "Search the employee directory by name or partial name and return matching "
+        "records with their EMP identifiers."
+    ),
+    "get_service": (
+        "Fetch one service-catalog entry by exact identifier, formatted SVC-NAME-000. "
+        "Returns the owning team, on-call rotation, and tier. Use search_services when "
+        "you only have a service name."
+    ),
+    "search_services": (
+        "Search the service catalog by name, capability, or owning team. Use this to "
+        "resolve questions about who owns or operates a service."
+    ),
+    "get_incident": (
+        "Fetch one incident record from the incident system by exact identifier, "
+        "formatted INC-0000-000. Returns status, severity, and the affected service."
+    ),
+    "search_incidents": (
+        "Search incident-system records by keyword, optionally narrowed to a date range "
+        "formatted YYYY-MM-DD/YYYY-MM-DD. This reads the incident system of record, not "
+        "the document corpus; use knowledge_search for written incident reports."
+    ),
+}
+
+
 def enterprise_tool_specs(
     client: EnterpriseClient,
     timeout_seconds: float,
@@ -78,6 +109,7 @@ def enterprise_tool_specs(
             timeout_seconds=timeout_seconds,
             max_result_bytes=max_result_bytes,
             retry_attempts=retry_attempts,
+            description=ENTERPRISE_TOOL_DESCRIPTIONS[name],
         )
         for name, input_model in schemas
     ]

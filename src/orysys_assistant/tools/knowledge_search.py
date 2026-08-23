@@ -84,4 +84,14 @@ def knowledge_search_spec(retrieval: RetrievalService, retries: int = 1) -> Tool
         input_model=KnowledgeSearchInput,
         handler=KnowledgeSearchTool(retrieval, retries),
         timeout_seconds=15,
+        description=(
+            "Hybrid dense and keyword search over the authorized Commercial Bank document "
+            "corpus. Returns evidence records with identifiers, titles, and content. "
+            "Optional filters narrow the search: department, document_type (one of incident, "
+            "meeting_note, runbook, architecture, policy, product_specification), and a "
+            "created_after/created_before date range. Results are always restricted to what "
+            "the current user is permitted to read, so an empty result means no authorized "
+            "match rather than a permission error. Issue several focused searches in parallel "
+            "rather than one broad search when a question spans topics or document types."
+        ),
     )

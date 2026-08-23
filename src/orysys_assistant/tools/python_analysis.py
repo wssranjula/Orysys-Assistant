@@ -93,4 +93,13 @@ def python_analysis_spec(max_records: int) -> ToolSpec:
         input_model=PythonAnalysisInput,
         handler=ControlledPythonAnalysisTool(max_records),
         timeout_seconds=10,
+        description=(
+            "Run one controlled aggregation over records you have already retrieved. Choose "
+            "the operation that answers the question: count_by for totals per value, "
+            "percentage for a share of the total, top_values for a ranked list, group_by for "
+            "grouped totals, and trend_by_date for change over time (which also needs "
+            "date_field). Pass the rows in `records` and the column to aggregate in `field`; "
+            "every record must contain that field. This executes fixed, audited operations, "
+            "not arbitrary Python."
+        ),
     )
