@@ -8,7 +8,7 @@ their public meaning for the POC.
 Clients send `Authorization: Bearer <token>`. Identity, role, namespace, department, and access
 scope are resolved server-side. These fields are forbidden in chat and tool payloads.
 
-## Endpoints planned for the Phase 1 surface
+## Current API surface
 
 | Method | Path | Success | Purpose |
 |---|---|---|---|
@@ -16,6 +16,13 @@ scope are resolved server-side. These fields are forbidden in chat and tool payl
 | `POST` | `/v1/chat/stream` | `200 text/event-stream` | stream activity, answer deltas, and final response |
 | `GET` | `/v1/conversations/{id}` | `200 application/json` | load an owned conversation |
 | `POST` | `/v1/feedback` | `202 application/json` | attach rating to an owned response |
+| `GET` | `/v1/memory/preferences` | `200 application/json` | list the caller's explicit preferences |
+| `PUT` | `/v1/memory/preferences/{key}` | `200 application/json` | create or update one explicit preference |
+| `DELETE` | `/v1/memory/preferences/{key}` | `204` | delete one explicit preference |
+| `POST` | `/v1/approvals` | `202 application/json` | create a pending administrator write request |
+| `GET` | `/v1/approvals` | `200 application/json` | list approval records for an administrator |
+| `GET` | `/v1/approvals/{id}` | `200 application/json` | retrieve one approval record |
+| `POST` | `/v1/approvals/{id}/decision` | `200 application/json` | approve or reject a request as a different administrator |
 | `GET` | `/health/live` | `200 application/json` | process liveness only |
 | `GET` | `/health/ready` | `200` or `503` | required dependency readiness |
 
@@ -91,7 +98,6 @@ The UI renders citations by `citation_id`; unresolvable citations are forbidden.
 | unknown owned resource | 404 | `not_found` | no |
 | rate limit exhausted | 429 | `rate_limit_exceeded` | yes |
 | retrieval unavailable | 503 | `retrieval_unavailable` | yes |
-| model unavailable | 503 | `model_unavailable` | yes |
 | request/tool deadline | 504 | `execution_timeout` | yes |
 | unexpected internal error | 500 | `internal_error` | maybe |
 

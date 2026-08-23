@@ -38,15 +38,18 @@ Show the same conversation ID, memory-loaded event, contextual response, and mem
 Explain that PostgreSQL stores bounded messages/summaries and evidence IDs, not full documents or
 hidden reasoning.
 
-## 5. RBAC and enterprise tools
+## 5. RBAC, enterprise tools, and approvals
 
 As Viewer ask for an employee-directory record and show the denied tool event. Repeat an approved
 service-ownership question as Analyst:
 
 > Who owns the Payments Gateway service?
 
-Show the read-only MCP call. Explain that Administrator additionally receives restricted-document
-scope, while no role receives write tools.
+Show the read-only MCP call. Sign in as `admin@commercialbank.test`, open the Approvals tab, and
+submit a synthetic incident-status change. Sign in as `approver@commercialbank.test` and approve it
+to demonstrate four-eyes control. Explain that Administrator additionally receives
+restricted-document scope and that the only write surface is this approval-gated synthetic incident
+change.
 
 ## 6. Security controls
 
@@ -76,7 +79,9 @@ uv run python scripts/check_public_readiness.py
 
 ## 9. Packaging and future work
 
-Show the five healthy Compose services, non-root/read-only container settings, `.env.example`, CI,
+Show the four demo credentials (including the separate approver account), then the five healthy
+Compose services, non-root/read-only container settings, `.env.example`, CI,
 ADRs, and `docs/assumptions-and-tradeoffs.md`. Close with provider-backed synthesis, enterprise SSO,
-managed infrastructure, ingestion orchestration, human approval for future writes, and feedback-led
+managed infrastructure, ingestion orchestration, replacement of the synthetic approval write with
+an idempotent enterprise integration, and feedback-led
 continuous evaluation.

@@ -1,4 +1,4 @@
-"""POC credential exchange for the three hardcoded users."""
+"""POC credential exchange for the four hardcoded users."""
 
 from fastapi import APIRouter
 

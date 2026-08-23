@@ -7,7 +7,7 @@ flowchart TD
     Employee --> UI[Streamlit UI]
     UI -->|SSE chat stream| API[FastAPI API]
     API --> Controls[Auth, rate limit, input guard, trusted scope]
-    Controls --> Root[LangGraph + LLM Supervisor]
+    Controls --> Root[LangGraph + model or local deterministic router]
     Root --> Search[Knowledge Search]
     Root --> Research[Research Subagent]
     Root --> Analysis[Analysis Subagent]
@@ -23,6 +23,7 @@ flowchart TD
     Root --> Output[Response and citation validator]
     Output --> API
     Root <--> Memory[(PostgreSQL checkpoints)]
+    API <--> Approvals[(PostgreSQL approval records)]
     Controls --> Redis[(Redis token buckets)]
     API -. logs and traces .-> Observability[Structured logs + LangSmith]
     Root -. traces .-> Observability
@@ -62,15 +63,18 @@ ownership, budgets, validation, retries, and cancellation.
 | Tool and document permissions | authorization policy service |
 | Conversation checkpoints | PostgreSQL |
 | Rate-limit buckets | Redis |
-| Dense vectors and metadata | Pinecone |
+| Dense vectors and metadata | Pinecone, or the deterministic in-memory adapter locally |
 | Sparse index | retrieval adapter-managed BM25 index |
 | Evidence ledger | per-request application state |
 | Agent execution state | LangGraph checkpoint/state |
+| Approval records | PostgreSQL in the Compose profile |
 | Logs and traces | structured logger and LangSmith |
 
 ## Failure containment
 
-External calls have explicit timeouts and bounded retries. One failed research worker does not
+External calls have explicit timeouts and bounded retries. The local profile uses deterministic
+routing when no OpenAI credential is configured; a configured model enables semantic routing and
+synthesis. One failed research worker does not
 cancel successful siblings. Sparse failure permits a marked dense-only result; retrieval or
 model failure never permits a fabricated answer. Client disconnect and overall deadline cancel
 outstanding graph and tool work.

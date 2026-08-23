@@ -14,6 +14,7 @@ from orysys_assistant.agent.models import (
     ResearchExecution,
 )
 from orysys_assistant.agent.research_graph import ResearchLimits, ResearchWorkflow, TransitionSink
+from orysys_assistant.agent.research_planner import ResearchPlanner
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.domain.errors import AuthorizationError, InvalidRequestError, ToolTimeoutError
 from orysys_assistant.retrieval.models import Evidence
@@ -29,8 +30,14 @@ def _evidence_from_tool(result: Any) -> list[Evidence]:
 class ResearchSubagent:
     name = "research_subagent"
 
-    def __init__(self, toolbox: ScopedToolbox, limits: ResearchLimits, checkpointer: Any) -> None:
-        self.workflow = ResearchWorkflow(toolbox, limits, checkpointer)
+    def __init__(
+        self,
+        toolbox: ScopedToolbox,
+        limits: ResearchLimits,
+        checkpointer: Any,
+        planner: ResearchPlanner | None = None,
+    ) -> None:
+        self.workflow = ResearchWorkflow(toolbox, limits, checkpointer, planner)
 
     @traceable(
         name="delegate-research-subagent",

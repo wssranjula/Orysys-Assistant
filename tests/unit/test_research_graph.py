@@ -32,17 +32,19 @@ def request_context() -> TrustedRequestContext:
     )
 
 
-def evidence_for(query: str) -> Evidence:
+def evidence_for(query: str, document_type: str = "incident") -> Evidence:
     identifier = hashlib.sha256(query.encode()).hexdigest()[:12]
     return Evidence(
         evidence_id=f"ev_{identifier}",
         document_id=f"doc_{identifier}",
         chunk_id=f"chunk_{identifier}",
         title=f"Incident {identifier}",
-        content="The root cause was an exhausted connection pool. Service recovered safely.",
+        content=(
+            f"{query} The root cause was an exhausted connection pool. Service recovered safely."
+        ),
         metadata={
             "source_path": f"incidents/{identifier}.md",
-            "document_type": "incident",
+            "document_type": document_type,
         },
         dense_score=0.8,
         sparse_score=0.7,
@@ -65,7 +67,9 @@ def limits(**overrides: Any) -> ResearchLimits:
     return ResearchLimits(**values)
 
 
-def workflow_with_handler(handler: Any, configured_limits: ResearchLimits) -> ResearchWorkflow:
+def workflow_with_handler(
+    handler: Any, configured_limits: ResearchLimits, planner: Any = None
+) -> ResearchWorkflow:
     gateway = ToolGateway(AuthorizationPolicy())
     gateway.register(
         ToolSpec(
@@ -76,8 +80,80 @@ def workflow_with_handler(handler: Any, configured_limits: ResearchLimits) -> Re
         )
     )
     return ResearchWorkflow(
-        ScopedToolbox(gateway, frozenset({"knowledge_search"})), configured_limits
+        ScopedToolbox(gateway, frozenset({"knowledge_search"})),
+        configured_limits,
+        planner=planner,
     )
+
+
+@pytest.mark.asyncio
+async def test_todo_planner_creates_claim_driven_tasks_instead_of_folder_fanout() -> None:
+    planned = [
+        "SEARCH: Project Orion controls reported complete | SOURCE: meeting_note | "
+        "VERIFY: Trace the original completion claims.",
+        "SEARCH: PAY-1224 root cause | SOURCE: incident | "
+        "VERIFY: Reconcile the initial and final root cause.",
+        "SEARCH: PAY-1288 connection budget | SOURCE: architecture | "
+        "VERIFY: Audit the declared control scope.",
+        "SEARCH: recovery consumer canary controls | SOURCE: runbook | "
+        "VERIFY: Assess the required recovery checks.",
+    ]
+    expected_queries = {
+        "Project Orion controls reported complete",
+        "PAY-1224 root cause",
+        "PAY-1288 connection budget",
+        "recovery consumer canary controls",
+    }
+
+    class FakeTodoPlanner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            self.calls.append({"question": question, **kwargs})
+            return planned
+
+    planner = FakeTodoPlanner()
+    observed_queries: list[str] = []
+    observed_document_types: list[str | None] = []
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        request = cast(KnowledgeSearchInput, parameters)
+        observed_queries.append(request.query)
+        observed_document_types.append(request.document_type)
+        return {
+            "evidence": [
+                evidence_for(request.query, request.document_type or "incident").model_dump(
+                    mode="json"
+                )
+            ]
+        }
+
+    workflow = workflow_with_handler(handler, limits(), planner)
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    execution = await workflow.run(
+        "Investigate Project Orion across incidents, meeting notes, runbooks, and architecture.",
+        request_context(),
+        capture,
+    )
+
+    assert len(planner.calls) == 1
+    assert set(observed_queries) == expected_queries
+    assert set(observed_document_types) == {
+        "meeting_note",
+        "incident",
+        "architecture",
+        "runbook",
+    }
+    assert execution.result.partial is False
+    planner_event = next(
+        item for item in transitions if item.node == "planner" and item.status == "completed"
+    )
+    assert [todo["content"] for todo in planner_event.metadata["todos"]] == planned
 
 
 @pytest.mark.asyncio
@@ -94,7 +170,12 @@ async def test_compiled_graph_bounds_concurrency_and_isolates_worker_failure() -
             await asyncio.sleep(0.02)
             if "meeting note" in query:
                 raise RuntimeError("simulated retrieval failure")
-            return {"evidence": [evidence_for(query).model_dump(mode="json")]}
+            request = cast(KnowledgeSearchInput, parameters)
+            return {
+                "evidence": [
+                    evidence_for(query, request.document_type or "incident").model_dump(mode="json")
+                ]
+            }
         finally:
             active -= 1
 
@@ -121,11 +202,52 @@ async def test_compiled_graph_bounds_concurrency_and_isolates_worker_failure() -
         "finalize",
     } <= set(workflow.graph.nodes)
     assert maximum_active == 2
-    assert execution.result.partial is False
-    assert len(execution.evidence) == 3
-    assert len(set(execution.result.evidence_ids)) == 3
+    assert execution.result.partial is True
+    assert len(execution.evidence) >= 3
+    assert len(set(execution.result.evidence_ids)) >= 3
     assert any("RuntimeError" in warning for warning in execution.result.warnings)
     assert any(item.node.startswith("worker:") for item in transitions)
+
+
+@pytest.mark.asyncio
+async def test_coverage_rejects_wrong_source_type_and_runs_gap_followup() -> None:
+    class FakeTodoPlanner:
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            return [
+                "SEARCH: Project Orion completion claims | SOURCE: meeting_note | "
+                "VERIFY: Establish which controls were reported complete."
+            ]
+
+    calls = 0
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "evidence": [evidence_for(f"irrelevant-{calls}", "incident").model_dump(mode="json")]
+        }
+
+    workflow = workflow_with_handler(
+        handler,
+        limits(
+            max_initial_tasks=1,
+            max_followup_tasks=1,
+            max_recursion_depth=1,
+            max_total_tool_calls=2,
+        ),
+        FakeTodoPlanner(),
+    )
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    execution = await workflow.run("Investigate Project Orion.", request_context(), capture)
+
+    assert calls == 2
+    assert execution.result.partial is True
+    assert execution.result.unresolved_questions
+    assert any(item.node == "followup_planner" for item in transitions)
 
 
 @pytest.mark.asyncio
@@ -167,6 +289,108 @@ async def test_empty_coverage_recurses_once_then_returns_partial_result() -> Non
     assert execution.result.unresolved_questions
     assert "3 bounded retrieval tasks" in execution.result.summary
     assert any("limits were reached" in warning for warning in execution.result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_followup_round_plans_new_retrievals_from_prior_context() -> None:
+    class GapClosingPlanner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            self.calls.append({"question": question, **kwargs})
+            if len(self.calls) == 1:
+                return [
+                    "SEARCH: Orion controls reported complete | SOURCE: meeting_note | "
+                    "VERIFY: Establish which controls were reported complete."
+                ]
+            return [
+                "SEARCH: Orion connection budget regression | SOURCE: architecture | "
+                "VERIFY: Explain the runtime evidence that changed the assessment."
+            ]
+
+    planner = GapClosingPlanner()
+    observed: list[tuple[str, str | None]] = []
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        request = cast(KnowledgeSearchInput, parameters)
+        observed.append((request.query, request.document_type))
+        return {
+            "evidence": [
+                evidence_for(f"unrelated-{len(observed)}", "incident").model_dump(mode="json")
+            ]
+        }
+
+    workflow = workflow_with_handler(
+        handler,
+        limits(
+            max_initial_tasks=1,
+            max_followup_tasks=1,
+            max_recursion_depth=1,
+            max_total_tool_calls=4,
+        ),
+        planner,
+    )
+
+    execution = await workflow.run("Investigate Project Orion.", request_context())
+
+    # The follow-up round must consult the planner again with what has already been
+    # tried, and must issue a different retrieval than the initial round.
+    assert len(planner.calls) == 2
+    assert planner.calls[1]["completed_tasks"]
+    assert planner.calls[1]["evidence_titles"]
+    assert observed == [
+        ("Orion controls reported complete", "meeting_note"),
+        ("Orion connection budget regression", "architecture"),
+    ]
+    assert execution.result.partial is True
+
+
+@pytest.mark.asyncio
+async def test_followup_stops_instead_of_repeating_an_attempted_retrieval() -> None:
+    class RepeatingPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def plan(self, question: str, **kwargs: Any) -> list[str]:
+            self.calls += 1
+            return ["SEARCH: identical gap query | SOURCE: elsewhere | VERIFY: Nothing new."]
+
+    calls = 0
+
+    async def handler(parameters: BaseModel, context: TrustedRequestContext) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"evidence": []}
+
+    planner = RepeatingPlanner()
+    workflow = workflow_with_handler(
+        handler,
+        limits(
+            max_initial_tasks=1,
+            max_followup_tasks=1,
+            max_recursion_depth=2,
+            max_total_tool_calls=8,
+        ),
+        planner,
+    )
+    transitions = []
+
+    async def capture(transition: Any) -> None:
+        transitions.append(transition)
+
+    execution = await workflow.run("Investigate Project Orion.", request_context(), capture)
+
+    # Retrieval is deterministic, so an identical query cannot return new evidence.
+    # The graph must stop rather than spend budget re-running it.
+    assert calls == 1
+    assert planner.calls == 2
+    followups = [
+        item for item in transitions if item.node == "followup_planner" and item.status == "started"
+    ]
+    assert len(followups) == 1
+    assert execution.result.partial is True
+    assert any("already attempted" in warning for warning in execution.result.warnings)
 
 
 @pytest.mark.asyncio

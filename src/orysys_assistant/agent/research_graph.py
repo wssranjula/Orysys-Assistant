@@ -3,7 +3,7 @@
 import asyncio
 import operator
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date
@@ -25,6 +25,7 @@ from orysys_assistant.agent.models import (
     ResearchTask,
     ResearchTaskResult,
 )
+from orysys_assistant.agent.research_planner import ResearchPlanner
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.guardrails.content import unwrap_evidence
@@ -32,6 +33,21 @@ from orysys_assistant.retrieval.models import Evidence, SearchFilters
 from orysys_assistant.security.models import AccessScope, TrustedRequestContext
 
 TransitionSink = Callable[[AgentTransition], Awaitable[None]]
+
+_TASK_FIELD_PATTERN = re.compile(
+    r"(?:^|\|)\s*(SEARCH|SOURCE|VERIFY)\s*:\s*(.*?)(?=\s*\|\s*(?:SEARCH|SOURCE|VERIFY)\s*:|$)",
+    re.IGNORECASE,
+)
+_SUPPORTED_DOCUMENT_TYPES = {
+    "incident",
+    "meeting_note",
+    "runbook",
+    "architecture",
+    "policy",
+    "product_specification",
+}
+_IDENTIFIER_PATTERN = re.compile(r"\b(?:PAY|OR|CG|INC|SVC)-\d+\b", re.IGNORECASE)
+_YEAR_PATTERN = re.compile(r"\b(20\d{2})\b")
 
 
 class ResearchState(TypedDict):
@@ -41,6 +57,7 @@ class ResearchState(TypedDict):
     filters: SearchFilters
     plan: ResearchPlan | None
     pending_tasks: list[ResearchTask]
+    attempted_tasks: Annotated[list[ResearchTask], operator.add]
     task: ResearchTask | None
     worker_results: Annotated[list[ResearchTaskResult], operator.add]
     completed_tasks: list[ResearchTaskResult]
@@ -52,6 +69,8 @@ class ResearchState(TypedDict):
     tool_calls_used: int
     partial: bool
     sufficient: bool
+    failure_circuit_open: bool
+    followups_exhausted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,10 +113,12 @@ class ResearchWorkflow:
         toolbox: ScopedToolbox,
         limits: ResearchLimits,
         checkpointer: Any = None,
+        planner: ResearchPlanner | None = None,
     ) -> None:
         self._toolbox = toolbox
         self._limits = limits
         self._checkpointer = checkpointer
+        self._planner_agent = planner
         self.graph = self._compile()
 
     def _compile(self) -> Any:
@@ -139,6 +160,7 @@ class ResearchWorkflow:
             "filters": SearchFilters(),
             "plan": None,
             "pending_tasks": [],
+            "attempted_tasks": [],
             "task": None,
             "worker_results": [],
             "completed_tasks": [],
@@ -150,6 +172,8 @@ class ResearchWorkflow:
             "tool_calls_used": 0,
             "partial": False,
             "sufficient": False,
+            "failure_circuit_open": False,
+            "followups_exhausted": False,
         }
         try:
             async with asyncio.timeout(self._limits.overall_timeout_seconds):
@@ -208,14 +232,41 @@ class ResearchWorkflow:
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
     ) -> dict[str, Any]:
         await self._node_event(runtime, "planner", "started")
-        tasks = self._initial_tasks(state["query"], state["filters"])
+        warnings = list(state["warnings"])
+        if self._planner_agent is None:
+            tasks = self._initial_tasks(state["query"], state["filters"])
+        else:
+            try:
+                tasks = await self._planned_tasks(
+                    state["query"],
+                    SearchFilters(),
+                    max_tasks=self._limits.max_initial_tasks,
+                )
+            except Exception as exc:
+                tasks = self._initial_tasks(state["query"], state["filters"])
+                warnings.append(
+                    f"Model-generated planning was unavailable; used bounded fallback: "
+                    f"{type(exc).__name__}."
+                )
         plan = ResearchPlan(
             objective=state["query"],
             tasks=tasks[: self._limits.max_initial_tasks],
             aggregation_method="deduplicate evidence and aggregate recurring supported claims",
         )
-        await self._node_event(runtime, "planner", "completed", {"task_count": len(plan.tasks)})
-        return {"plan": plan, "pending_tasks": plan.tasks}
+        await self._node_event(
+            runtime,
+            "planner",
+            "completed",
+            {
+                "task_count": len(plan.tasks),
+                "plan_summary": self._plan_summary(plan.tasks),
+                "todos": [
+                    {"id": task.task_id, "content": task.question, "status": "pending"}
+                    for task in plan.tasks
+                ],
+            },
+        )
+        return {"plan": plan, "pending_tasks": plan.tasks, "warnings": warnings}
 
     async def _workers(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
@@ -228,6 +279,8 @@ class ResearchWorkflow:
             warnings.append("Research tool-call budget prevented some tasks from running.")
         return {
             "pending_tasks": tasks,
+            # Accumulated so follow-up rounds can tell which retrievals were already tried.
+            "attempted_tasks": tasks,
             "warnings": warnings,
         }
 
@@ -259,10 +312,20 @@ class ResearchWorkflow:
         task: ResearchTask,
         runtime: Runtime[ResearchGraphContext],
     ) -> ResearchTaskResult:
-        await self._node_event(runtime, f"worker:{task.task_id}", "started")
+        await self._node_event(
+            runtime,
+            f"worker:{task.task_id}",
+            "started",
+            {
+                "todo_id": task.task_id,
+                "todo_content": task.question,
+                "todo_status": "in_progress",
+            },
+            message=f"Researching: {task.question[:240]}",
+        )
         worker_metadata: dict[str, Any] = {}
         parameters: dict[str, Any] = {
-            "query": task.question,
+            "query": task.search_query or task.question,
             "top_k": self._limits.max_chunks_per_worker,
             **task.filters.model_dump(mode="json", exclude_none=True),
         }
@@ -272,6 +335,7 @@ class ResearchWorkflow:
                     "knowledge_search", parameters, runtime.context.request_context
                 )
             evidence = self._evidence_from_result(raw)
+            coverage_satisfied = self._task_has_coverage(task, evidence)
             worker_metadata = {
                 "candidate_count": int(raw.get("candidate_count", len(evidence))),
                 "selected_evidence_count": len(evidence),
@@ -285,22 +349,26 @@ class ResearchWorkflow:
             ]
             result = ResearchTaskResult(
                 task_id=task.task_id,
-                status="completed",
+                status="completed" if coverage_satisfied else "incomplete",
                 findings=findings,
                 evidence=evidence,
-                warning=None if evidence else "No authorized evidence matched this task.",
+                warning=(None if coverage_satisfied else self._coverage_warning(task, evidence)),
+                coverage_satisfied=coverage_satisfied,
             )
         except TimeoutError:
             result = ResearchTaskResult(
                 task_id=task.task_id,
                 status="failed",
                 warning="Retrieval timed out.",
+                failure_kind="dependency_timeout",
+                retryable=True,
             )
         except Exception as exc:
             result = ResearchTaskResult(
                 task_id=task.task_id,
                 status="failed",
                 warning=f"Worker failed safely: {type(exc).__name__}.",
+                failure_kind=type(exc).__name__,
             )
         await self._node_event(
             runtime,
@@ -309,8 +377,12 @@ class ResearchWorkflow:
             {
                 "status": result.status,
                 "evidence_count": len(result.evidence),
+                "todo_id": task.task_id,
+                "todo_content": task.question,
+                "todo_status": ("completed" if result.coverage_satisfied else "pending"),
                 **worker_metadata,
             },
+            message=f"Research task {result.status}: {task.question[:220]}",
         )
         return result
 
@@ -341,11 +413,25 @@ class ResearchWorkflow:
                         occurrence_count=(current.occurrence_count or 1) + 1,
                     )
         findings = list(claims.values())
+        pending_ids = {task.task_id for task in state["pending_tasks"]}
+        cycle_results = [item for item in completed_tasks if item.task_id in pending_ids]
+        failed_results = [item for item in cycle_results if item.status == "failed"]
+        failure_circuit_open = bool(cycle_results) and len(failed_results) == len(cycle_results)
+        if failure_circuit_open:
+            warnings.append(
+                "All workers in this collaboration round failed; follow-up fan-out was "
+                "stopped to contain a likely shared dependency failure."
+            )
         await self._node_event(
             runtime,
             "reducer",
             "completed",
-            {"evidence_count": len(evidence), "finding_count": len(findings)},
+            {
+                "evidence_count": len(evidence),
+                "finding_count": len(findings),
+                "failed_worker_count": len(failed_results),
+                "failure_circuit_open": failure_circuit_open,
+            },
         )
         await self._node_event(
             runtime, "workers", "completed", {"task_count": len(state["pending_tasks"])}
@@ -357,26 +443,47 @@ class ResearchWorkflow:
             "evidence": evidence,
             "findings": findings,
             "warnings": warnings,
+            "failure_circuit_open": failure_circuit_open,
         }
 
     async def _coverage_check(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
     ) -> dict[str, Any]:
         await self._node_event(runtime, "coverage_check", "started")
-        completed = [item for item in state["completed_tasks"] if item.status == "completed"]
-        sufficient = len(state["evidence"]) >= 3 and len(completed) >= 2
+        plan_tasks = state["plan"].tasks if state["plan"] else []
+        all_evidence = list(state["evidence"].values())
+        covered_task_ids = {
+            task.task_id for task in plan_tasks if self._task_has_coverage(task, all_evidence)
+        }
+        sufficient = (
+            bool(plan_tasks)
+            and len(state["evidence"]) >= 3
+            and len(covered_task_ids) == len(plan_tasks)
+        )
         budget_exhausted = state["tool_calls_used"] >= self._limits.max_total_tool_calls
         depth_exhausted = state["recursion_depth"] >= self._limits.max_recursion_depth
-        partial = not sufficient and (budget_exhausted or depth_exhausted)
-        unresolved = [] if sufficient else self._unresolved(state)
+        partial = not sufficient and (
+            budget_exhausted
+            or depth_exhausted
+            or state["failure_circuit_open"]
+            or state["followups_exhausted"]
+        )
+        unresolved = [] if sufficient else self._unresolved(state, covered_task_ids)
         warnings = list(state["warnings"])
-        if partial:
+        if not sufficient and (budget_exhausted or depth_exhausted):
             warnings.append("Research limits were reached before evidence coverage was sufficient.")
         await self._node_event(
             runtime,
             "coverage_check",
             "completed",
-            {"sufficient": sufficient, "partial": partial},
+            {
+                "sufficient": sufficient,
+                "partial": partial,
+                "covered_task_count": len(covered_task_ids),
+                "planned_task_count": len(plan_tasks),
+                "failure_circuit_open": state["failure_circuit_open"],
+                "followups_exhausted": state["followups_exhausted"],
+            },
         )
         return {
             "sufficient": sufficient,
@@ -386,7 +493,12 @@ class ResearchWorkflow:
         }
 
     def _next_after_coverage(self, state: ResearchState) -> Literal["followup", "finalize"]:
-        if state["sufficient"] or state["partial"]:
+        if (
+            state["sufficient"]
+            or state["partial"]
+            or state["failure_circuit_open"]
+            or state["followups_exhausted"]
+        ):
             return "finalize"
         if self._limits.max_followup_tasks == 0:
             return "finalize"
@@ -395,21 +507,68 @@ class ResearchWorkflow:
     async def _followup_planner(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
     ) -> dict[str, Any]:
+        """Plan a genuinely new retrieval round, or stop if nothing new is left to try.
+
+        The planner sees the tasks already run and the evidence already collected so it
+        can reframe the gap instead of repeating it.  Any task whose retrieval scope
+        matches an earlier attempt is dropped: retrieval is deterministic, so re-issuing
+        an identical query cannot return new evidence and would only burn budget.
+        """
+
         await self._node_event(runtime, "followup_planner", "started")
         depth = state["recursion_depth"] + 1
-        tasks = [
-            ResearchTask(
-                task_id=f"followup-{depth}-{index}",
-                question=f"{state['query']} Cross-check {focus} evidence and missing context.",
-                filters=SearchFilters(document_type=document_type),
-                expected_output=f"Corroborating {focus} evidence",
+        warnings = list(state["warnings"])
+        attempted = {self._task_signature(task) for task in state["attempted_tasks"]}
+        planned: list[ResearchTask] = []
+        planner_used = False
+        if self._planner_agent is not None:
+            try:
+                planned = await self._planned_tasks(
+                    state["query"],
+                    SearchFilters(),
+                    max_tasks=self._limits.max_followup_tasks,
+                    prefix=f"followup-{depth}",
+                    completed_tasks=[task.question for task in state["attempted_tasks"]],
+                    evidence_titles=[item.title for item in state["evidence"].values()],
+                )
+                planner_used = True
+            except Exception as exc:
+                warnings.append(
+                    "Model-generated follow-up planning was unavailable; used bounded "
+                    f"fallback: {type(exc).__name__}."
+                )
+
+        tasks = self._unattempted(planned, attempted)
+        if not tasks:
+            planner_used = False
+            tasks = self._unattempted(self._gap_followup_tasks(state, depth), attempted)
+        exhausted = not tasks
+        if exhausted:
+            warnings.append(
+                "Follow-up research stopped because every remaining gap-closing task "
+                "repeated a retrieval that was already attempted."
             )
-            for index, (focus, document_type) in enumerate(
-                (("runbook", "runbook"), ("architecture", "architecture")), start=1
-            )
-        ][: self._limits.max_followup_tasks]
-        await self._node_event(runtime, "followup_planner", "completed", {"task_count": len(tasks)})
-        return {"pending_tasks": tasks, "recursion_depth": depth}
+        await self._node_event(
+            runtime,
+            "followup_planner",
+            "completed",
+            {
+                "task_count": len(tasks),
+                "plan_summary": self._plan_summary(tasks),
+                "planning_source": "model" if planner_used else "widened_scope_fallback",
+                "followups_exhausted": exhausted,
+                "todos": [
+                    {"id": task.task_id, "content": task.question, "status": "pending"}
+                    for task in tasks
+                ],
+            },
+        )
+        return {
+            "pending_tasks": tasks,
+            "recursion_depth": depth,
+            "warnings": list(dict.fromkeys(warnings)),
+            "followups_exhausted": exhausted,
+        }
 
     async def _finalize(
         self, state: ResearchState, runtime: Runtime[ResearchGraphContext]
@@ -430,6 +589,7 @@ class ResearchWorkflow:
                 ResearchTask(
                     task_id=f"initial-{index}",
                     question=f"{query} Focus on months {start:02d}-{end:02d} of {year}.",
+                    search_query=f"payment incidents {year} root cause impact",
                     filters=SearchFilters(
                         document_type="incident",
                         created_after=date(year, start, 1),
@@ -444,6 +604,7 @@ class ResearchWorkflow:
             ResearchTask(
                 task_id=f"initial-{index}",
                 question=f"{query} Focus on {document_type.replace('_', ' ')} evidence.",
+                search_query=self._fallback_search_query(query, document_type),
                 filters=SearchFilters(
                     department=filters.department,
                     document_type=document_type,
@@ -454,6 +615,217 @@ class ResearchWorkflow:
             )
             for index, document_type in enumerate(task_types, start=1)
         ]
+
+    async def _planned_tasks(
+        self,
+        query: str,
+        filters: SearchFilters,
+        *,
+        max_tasks: int,
+        prefix: str = "initial",
+        completed_tasks: Sequence[str] = (),
+        evidence_titles: Sequence[str] = (),
+    ) -> list[ResearchTask]:
+        if self._planner_agent is None:
+            raise RuntimeError("No model-generated research planner is configured.")
+        questions = await self._planner_agent.plan(
+            query,
+            max_tasks=max_tasks,
+            completed_tasks=completed_tasks,
+            evidence_titles=evidence_titles,
+        )
+        return [
+            self._compile_planned_task(
+                question,
+                filters,
+                task_id=f"{prefix}-{index}",
+            )
+            for index, question in enumerate(questions[:max_tasks], start=1)
+        ]
+
+    def _fallback_followup_tasks(self, query: str, depth: int) -> list[ResearchTask]:
+        return [
+            ResearchTask(
+                task_id=f"followup-{depth}-{index}",
+                question=f"{query} Cross-check {focus} evidence and missing context.",
+                search_query=self._fallback_search_query(query, document_type),
+                filters=SearchFilters(document_type=document_type),
+                expected_output=f"Corroborating {focus} evidence",
+            )
+            for index, (focus, document_type) in enumerate(
+                (("runbook", "runbook"), ("architecture", "architecture")), start=1
+            )
+        ][: self._limits.max_followup_tasks]
+
+    def _gap_followup_tasks(self, state: ResearchState, depth: int) -> list[ResearchTask]:
+        """Retry uncovered plan requirements with a deliberately widened retrieval scope."""
+        if state["plan"] is None:
+            return self._fallback_followup_tasks(state["query"], depth)
+        evidence = list(state["evidence"].values())
+        missing = [
+            task for task in state["plan"].tasks if not self._task_has_coverage(task, evidence)
+        ]
+        return [
+            self._widened_task(task, task_id=f"followup-{depth}-{index}")
+            for index, task in enumerate(missing[: self._limits.max_followup_tasks], start=1)
+        ]
+
+    @staticmethod
+    def _widened_task(task: ResearchTask, *, task_id: str) -> ResearchTask:
+        """Drop the document-type and date narrowing that failed to produce evidence.
+
+        The authorized department scope is preserved because it is a retrieval boundary,
+        not a search heuristic.  Widening changes the candidate set, so unlike a verbatim
+        copy this retry can actually surface evidence the first attempt could not see.
+        """
+
+        return task.model_copy(
+            update={
+                "task_id": task_id,
+                "question": f"Gap-closing follow-up with widened scope: {task.question}",
+                "filters": SearchFilters(department=task.filters.department),
+                "minimum_evidence": 1,
+            }
+        )
+
+    @classmethod
+    def _unattempted(
+        cls, tasks: Sequence[ResearchTask], attempted: set[str]
+    ) -> list[ResearchTask]:
+        """Keep only tasks whose retrieval scope has not already been executed."""
+        seen = set(attempted)
+        fresh: list[ResearchTask] = []
+        for task in tasks:
+            signature = cls._task_signature(task)
+            if signature in seen:
+                continue
+            fresh.append(task)
+            seen.add(signature)
+        return fresh
+
+    @staticmethod
+    def _task_signature(task: ResearchTask) -> str:
+        """Identify a retrieval by the inputs that decide its result set."""
+        filters = task.filters
+        return "|".join(
+            (
+                " ".join((task.search_query or task.question).casefold().split()),
+                filters.document_type or "",
+                filters.department or "",
+                filters.created_after.isoformat() if filters.created_after else "",
+                filters.created_before.isoformat() if filters.created_before else "",
+            )
+        )
+
+    @classmethod
+    def _compile_planned_task(
+        cls, question: str, base_filters: SearchFilters, *, task_id: str
+    ) -> ResearchTask:
+        fields = {
+            match.group(1).upper(): " ".join(match.group(2).split())
+            for match in _TASK_FIELD_PATTERN.finditer(question)
+        }
+        source = fields.get("SOURCE", "").lower().replace(" ", "_")
+        document_type = source if source in _SUPPORTED_DOCUMENT_TYPES else None
+        search_query = fields.get("SEARCH") or cls._fallback_search_query(question, document_type)
+        search_query = search_query[:300]
+        identifiers = list(
+            dict.fromkeys(
+                match.group(0).upper() for match in _IDENTIFIER_PATTERN.finditer(search_query)
+            )
+        )
+        years = [int(value) for value in _YEAR_PATTERN.findall(f"{search_query} {question}")]
+        created_after = base_filters.created_after
+        created_before = base_filters.created_before
+        if years and not created_after and not created_before:
+            year = min(years)
+            created_after = date(year, 1, 1)
+            created_before = date(max(years), 12, 31)
+        task_filters = SearchFilters(
+            department=base_filters.department,
+            document_type=document_type or base_filters.document_type,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        minimum_evidence = 1
+        normalized = f"{search_query} {fields.get('VERIFY', '')}".lower()
+        if document_type == "incident" and any(
+            term in normalized for term in ("all ", "failures", "incidents", "timeline")
+        ):
+            minimum_evidence = 2
+        return ResearchTask(
+            task_id=task_id,
+            question=question,
+            search_query=search_query,
+            filters=task_filters,
+            expected_output=fields.get("VERIFY", "Evidence that resolves this research todo"),
+            required_identifiers=identifiers,
+            minimum_evidence=minimum_evidence,
+        )
+
+    @staticmethod
+    def _fallback_search_query(query: str, document_type: str | None) -> str:
+        compact = re.sub(
+            r"\b(deliverable|for each|collect|capture|include|produce)\b.*$",
+            "",
+            " ".join(query.split()),
+            flags=re.IGNORECASE,
+        ).strip(" |")
+        if document_type is None:
+            return compact[:300]
+        return f"{compact[:220]} {document_type.replace('_', ' ')}".strip()
+
+    @classmethod
+    def _task_has_coverage(cls, task: ResearchTask, evidence: Sequence[Evidence]) -> bool:
+        matching = [item for item in evidence if cls._evidence_matches_task(task, item)]
+        if len(matching) < task.minimum_evidence:
+            return False
+        if not task.required_identifiers:
+            return True
+        combined = " ".join(
+            f"{item.title} {unwrap_evidence(item.content)}" for item in matching
+        ).upper()
+        return all(identifier in combined for identifier in task.required_identifiers)
+
+    @staticmethod
+    def _evidence_matches_task(task: ResearchTask, evidence: Evidence) -> bool:
+        metadata = evidence.metadata
+        if (
+            task.filters.document_type
+            and metadata.get("document_type") != task.filters.document_type
+        ):
+            return False
+        raw_date = metadata.get("created_date")
+        try:
+            evidence_date = date.fromisoformat(str(raw_date)) if raw_date else None
+        except ValueError:
+            evidence_date = None
+        if task.filters.created_after and (
+            evidence_date is None or evidence_date < task.filters.created_after
+        ):
+            return False
+        return not (
+            task.filters.created_before
+            and (evidence_date is None or evidence_date > task.filters.created_before)
+        )
+
+    @staticmethod
+    def _coverage_warning(task: ResearchTask, evidence: Sequence[Evidence]) -> str:
+        return (
+            f"Evidence did not satisfy task {task.task_id}: expected at least "
+            f"{task.minimum_evidence} matching record(s)"
+            + (
+                f" covering {', '.join(task.required_identifiers)}."
+                if task.required_identifiers
+                else "."
+            )
+        )
+
+    @staticmethod
+    def _plan_summary(tasks: Sequence[ResearchTask]) -> str:
+        return "Research todos: " + "; ".join(
+            f"{index}. {task.question}" for index, task in enumerate(tasks, start=1)
+        )
 
     @staticmethod
     def _query_filters(query: str) -> SearchFilters:
@@ -497,13 +869,14 @@ class ResearchWorkflow:
         return re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
 
     @staticmethod
-    def _unresolved(state: ResearchState) -> list[str]:
-        failed = {
-            item.task_id
-            for item in state["completed_tasks"]
-            if item.status != "completed" or not item.evidence
-        }
-        return [f"Evidence coverage remains incomplete for task {task_id}." for task_id in failed]
+    def _unresolved(state: ResearchState, covered_task_ids: set[str] | None = None) -> list[str]:
+        covered = covered_task_ids or set()
+        plan_tasks = state["plan"].tasks if state["plan"] else []
+        return [
+            f"Evidence coverage remains incomplete for task {task.task_id}: {task.expected_output}."
+            for task in plan_tasks
+            if task.task_id not in covered
+        ]
 
     @staticmethod
     def _summary(state: ResearchState) -> str:
@@ -519,13 +892,14 @@ class ResearchWorkflow:
         node: str,
         status: str,
         metadata: dict[str, Any] | None = None,
+        message: str | None = None,
     ) -> None:
         transition = AgentTransition(
             event_type=f"research_node_{status}",
             agent="research_subagent",
             node=node,
             status=status,
-            message=f"Research node {node.replace('_', ' ')} {status}.",
+            message=message or f"Research node {node.replace('_', ' ')} {status}.",
             metadata=metadata or {},
         )
         with suppress(RuntimeError):

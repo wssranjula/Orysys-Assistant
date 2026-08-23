@@ -7,6 +7,7 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from redis.exceptions import RedisError
 
+from orysys_assistant.agent.approval_graph import ApprovalService
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import (
@@ -82,6 +83,13 @@ async def get_conversation_repository(request: Request) -> ConversationRepositor
 ConversationRepositoryDependency = Annotated[
     ConversationRepository, Depends(get_conversation_repository)
 ]
+
+
+def get_approval_service(request: Request) -> ApprovalService:
+    return cast(ApprovalService, request.app.state.approval_service)
+
+
+ApprovalServiceDependency = Annotated[ApprovalService, Depends(get_approval_service)]
 
 
 def get_current_identity(

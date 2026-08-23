@@ -18,7 +18,7 @@ existing code-controlled branches and the application generates the route's user
 The `out_of_scope` branch calls no tools and returns a fixed explanation of supported duties for
 unrelated, casual, creative, or otherwise unsupported requests.
 
-Production requires a configured model credential and has no deterministic keyword fallback. Tests
+When no model credential is configured, the local Compose profile uses a deterministic router. Tests
 and offline contract checks may inject an `AgentRouter` implementation explicitly; dependency
 injection is not selected automatically by runtime configuration.
 
@@ -30,6 +30,7 @@ guard narrows tool selection and does not grant permissions or provide a general
 
 ## Consequences
 
-Routing handles semantic and contextual intent instead of relying on vocabulary. A model outage can
-prevent routing, but cannot broaden permissions or invent graph branches. Supervisor calls and the
-validated choice are traced, while hidden reasoning is neither requested nor exposed.
+The model-backed router handles semantic and contextual intent; the local fallback favors
+availability over semantic precision. Neither route can broaden permissions or invent graph
+branches. Supervisor calls and validated choices are traced, while hidden reasoning is neither
+requested nor exposed.

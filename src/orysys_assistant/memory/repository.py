@@ -2,13 +2,13 @@
 
 import asyncio
 import json
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 import asyncpg  # type: ignore[import-untyped]
 
 from orysys_assistant.domain.errors import AuthorizationError
-from orysys_assistant.memory.models import ConversationRecord, StoredMessage
+from orysys_assistant.memory.models import ConversationRecord, LongTermPreference, StoredMessage
 
 
 class ConversationRepository(Protocol):
@@ -26,6 +26,12 @@ class ConversationRepository(Protocol):
         assistant_message: str,
         evidence_ids: list[str],
     ) -> ConversationRecord: ...
+
+    async def list_preferences(self, user_id: str) -> list[LongTermPreference]: ...
+
+    async def upsert_preference(self, user_id: str, key: str, value: str) -> LongTermPreference: ...
+
+    async def delete_preference(self, user_id: str, key: str) -> bool: ...
 
     async def close(self) -> None: ...
 
@@ -59,6 +65,7 @@ class InMemoryConversationRepository:
 
     def __init__(self, max_messages: int, max_summary_characters: int) -> None:
         self._records: dict[UUID, ConversationRecord] = {}
+        self._preferences: dict[tuple[str, str], LongTermPreference] = {}
         self._lock = asyncio.Lock()
         self._max_messages = max_messages
         self._max_summary_characters = max_summary_characters
@@ -107,6 +114,27 @@ class InMemoryConversationRepository:
     async def close(self) -> None:
         return None
 
+    async def list_preferences(self, user_id: str) -> list[LongTermPreference]:
+        async with self._lock:
+            return sorted(
+                (
+                    item.model_copy(deep=True)
+                    for (owner, _), item in self._preferences.items()
+                    if owner == user_id
+                ),
+                key=lambda item: item.key,
+            )
+
+    async def upsert_preference(self, user_id: str, key: str, value: str) -> LongTermPreference:
+        preference = LongTermPreference(user_id=user_id, key=key, value=value)
+        async with self._lock:
+            self._preferences[(user_id, key)] = preference
+        return preference.model_copy(deep=True)
+
+    async def delete_preference(self, user_id: str, key: str) -> bool:
+        async with self._lock:
+            return self._preferences.pop((user_id, key), None) is not None
+
     @staticmethod
     def _require_owner(record: ConversationRecord, user_id: str) -> None:
         if record.user_id != user_id:
@@ -136,6 +164,17 @@ class PostgresConversationRepository:
                     summary TEXT NOT NULL DEFAULT '',
                     evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS long_term_preferences (
+                    user_id TEXT NOT NULL,
+                    preference_key TEXT NOT NULL,
+                    preference_value TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (user_id, preference_key)
                 )
                 """
             )
@@ -222,6 +261,58 @@ class PostgresConversationRepository:
         if self._pool is not None:
             await self._pool.close()
             self._pool = None
+
+    async def list_preferences(self, user_id: str) -> list[LongTermPreference]:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT user_id, preference_key, preference_value, updated_at
+                FROM long_term_preferences WHERE user_id = $1 ORDER BY preference_key
+                """,
+                user_id,
+            )
+        return [
+            LongTermPreference(
+                user_id=row["user_id"],
+                key=row["preference_key"],
+                value=row["preference_value"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    async def upsert_preference(self, user_id: str, key: str, value: str) -> LongTermPreference:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                INSERT INTO long_term_preferences (user_id, preference_key, preference_value)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id, preference_key) DO UPDATE
+                SET preference_value = EXCLUDED.preference_value, updated_at = NOW()
+                RETURNING user_id, preference_key, preference_value, updated_at
+                """,
+                user_id,
+                key,
+                value,
+            )
+        return LongTermPreference(
+            user_id=row["user_id"],
+            key=row["preference_key"],
+            value=row["preference_value"],
+            updated_at=row["updated_at"],
+        )
+
+    async def delete_preference(self, user_id: str, key: str) -> bool:
+        pool = self._require_pool()
+        async with pool.acquire() as connection:
+            result = await connection.execute(
+                "DELETE FROM long_term_preferences WHERE user_id = $1 AND preference_key = $2",
+                user_id,
+                key,
+            )
+        return cast(str, result) == "DELETE 1"
 
     def _require_pool(self) -> asyncpg.Pool:
         if self._pool is None:

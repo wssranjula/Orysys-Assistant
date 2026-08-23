@@ -24,3 +24,12 @@ class ConversationRecord(MemoryModel):
     summary: str = ""
     evidence_ids: list[str] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class LongTermPreference(MemoryModel):
+    """An explicit user preference, isolated from conversation checkpoints."""
+
+    user_id: str
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,49}$")
+    value: str = Field(min_length=1, max_length=500)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

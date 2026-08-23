@@ -7,7 +7,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute, AgentTransition
+from orysys_assistant.agent.models import (
+    AgentExecutionResult,
+    AgentRoute,
+    AgentTransition,
+    AnswerToken,
+)
 from orysys_assistant.agent.router import RouteDecision
 from orysys_assistant.api.routes import chat as chat_routes
 from orysys_assistant.config import Settings
@@ -19,6 +24,7 @@ TOKENS = {
     "viewer": "phase2-viewer-demo-token",
     "analyst": "phase2-analyst-demo-token",
     "administrator": "phase2-administrator-demo-token",
+    "approver": "phase10-approver-demo-token",
 }
 
 
@@ -224,6 +230,73 @@ async def test_chat_stream_separates_activity_tokens_and_final(client: httpx.Asy
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_forwards_generated_tokens_without_replaying_them(
+    app: Any, client: httpx.AsyncClient
+) -> None:
+    class StreamingOrchestrator:
+        name = "streaming_root_agent"
+
+        async def stream(self, message: str, *args: Any, **kwargs: Any) -> Any:
+            for piece in ("Remote work ", "is permitted [1]."):
+                yield AnswerToken(text=piece)
+            yield AgentExecutionResult(
+                route=AgentRoute.DIRECT_KNOWLEDGE,
+                answer="Remote work is permitted [1].",
+                citations=[
+                    Citation(
+                        citation_id="1",
+                        evidence_id="ev_stream",
+                        document_id="policy-stream-001",
+                        chunk_id="policy-stream-001:purpose:0000",
+                        title="Remote Work Policy",
+                        source_path="policies/policy-stream-001.md",
+                    )
+                ],
+                evidence_ids=["ev_stream"],
+                evidence=[
+                    Evidence(
+                        evidence_id="ev_stream",
+                        document_id="policy-stream-001",
+                        chunk_id="policy-stream-001:purpose:0000",
+                        title="Remote Work Policy",
+                        content="Remote work is permitted for approved roles.",
+                        metadata={
+                            "access_level": "internal",
+                            "source_path": "policies/policy-stream-001.md",
+                        },
+                        final_score=1.0,
+                    )
+                ],
+            )
+
+    app.state.agent_runtime.orchestrator = StreamingOrchestrator()
+
+    response = await client.post(
+        "/v1/chat/stream",
+        json={"message": "What does the remote-work policy allow?"},
+        headers=auth_headers(),
+    )
+
+    events = parse_sse(response.text)
+    names = [name for name, _ in events]
+    deltas = [event for name, event in events if name == "answer_delta"]
+
+    # Exactly the model's own chunks, marked provisional, and emitted before the
+    # answer was validated rather than replayed from the finished answer afterwards.
+    assert [event["text"] for event in deltas] == ["Remote work ", "is permitted [1]."]
+    assert all(event["provisional"] is True for event in deltas)
+    validation_index = next(
+        index
+        for index, (name, event) in enumerate(events)
+        if name == "activity" and event["event_type"] == "validation_started"
+    )
+    first_delta_index = names.index("answer_delta")
+    assert first_delta_index < validation_index
+    assert events[-1][0] == "final"
+    assert events[-1][1]["answer"] == "Remote work is permitted [1]."
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_uses_explicit_langsmith_configuration(
     client: httpx.AsyncClient,
     app: Any,
@@ -290,6 +363,97 @@ async def test_placeholder_conversation_and_feedback_contracts(
         "accepted": True,
         "persistence": "not_available_in_phase_1",
     }
+
+
+@pytest.mark.asyncio
+async def test_explicit_long_term_memory_is_loaded_and_owner_isolated(
+    client: httpx.AsyncClient, app: Any
+) -> None:
+    denied = await client.put(
+        "/v1/memory/preferences/answer_style",
+        json={"key": "answer_style", "value": "Use concise bullets", "explicit": False},
+        headers=auth_headers("analyst"),
+    )
+    saved = await client.put(
+        "/v1/memory/preferences/answer_style",
+        json={"key": "answer_style", "value": "Use concise bullets", "explicit": True},
+        headers=auth_headers("analyst"),
+    )
+    analyst_list = await client.get("/v1/memory/preferences", headers=auth_headers("analyst"))
+    viewer_list = await client.get("/v1/memory/preferences", headers=auth_headers("viewer"))
+    chat = await client.post(
+        "/v1/chat/stream", json={"message": "Use my preferences"}, headers=auth_headers("analyst")
+    )
+
+    assert denied.status_code == 400
+    assert saved.status_code == 200
+    assert analyst_list.json()["preferences"][0]["value"] == "Use concise bullets"
+    assert viewer_list.json()["preferences"] == []
+    assert chat.status_code == 200
+    assert "Explicit preference answer_style" in app.state.agent_runtime.orchestrator.summaries[-1]
+
+
+@pytest.mark.asyncio
+async def test_admin_write_requires_approval_and_is_idempotent(
+    client: httpx.AsyncClient, app: Any
+) -> None:
+    payload = {
+        "action": "modify_incident",
+        "parameters": {
+            "incident_id": "INC-2026-004",
+            "status": "resolved",
+            "reason": "All recovery checks passed",
+        },
+        "reason": "Close recovered incident",
+    }
+    viewer = await client.post("/v1/approvals", json=payload, headers=auth_headers("viewer"))
+    pending = await client.post(
+        "/v1/approvals", json=payload, headers=auth_headers("administrator")
+    )
+
+    assert viewer.status_code == 403
+    assert pending.status_code == 202
+    assert pending.json()["status"] == "pending"
+    assert app.state.incident_write_store.updates == []
+
+    pending_list = await client.get(
+        "/v1/approvals?approval_status=pending",
+        headers=auth_headers("administrator"),
+    )
+    viewer_list = await client.get("/v1/approvals", headers=auth_headers("viewer"))
+    assert [item["approval_id"] for item in pending_list.json()["approvals"]] == [
+        pending.json()["approval_id"]
+    ]
+    assert viewer_list.status_code == 403
+
+    approval_id = pending.json()["approval_id"]
+    self_approval = await client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        json={"approved": True},
+        headers=auth_headers("administrator"),
+    )
+    approved = await client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        json={"approved": True},
+        headers=auth_headers("approver"),
+    )
+    duplicate = await client.post(
+        f"/v1/approvals/{approval_id}/decision",
+        json={"approved": True},
+        headers=auth_headers("approver"),
+    )
+
+    assert self_approval.status_code == 403
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "executed"
+    assert len(app.state.incident_write_store.updates) == 1
+    assert duplicate.status_code == 400
+    assert len(app.state.incident_write_store.updates) == 1
+    no_longer_pending = await client.get(
+        "/v1/approvals?approval_status=pending",
+        headers=auth_headers("administrator"),
+    )
+    assert no_longer_pending.json()["approvals"] == []
 
 
 @pytest.mark.asyncio

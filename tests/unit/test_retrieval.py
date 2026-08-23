@@ -21,6 +21,7 @@ from orysys_assistant.retrieval.models import (
     SparseVector,
 )
 from orysys_assistant.retrieval.parsing import MarkdownDocumentParser
+from orysys_assistant.retrieval.reranking import HybridLexicalReranker
 from orysys_assistant.retrieval.service import RetrievalService
 from orysys_assistant.retrieval.sparse_encoding import BM25SparseEncoder
 from orysys_assistant.retrieval.vector_store import InMemoryVectorStore, PineconeVectorStore
@@ -63,6 +64,7 @@ async def build_retrieval(tmp_path: Path) -> tuple[RetrievalService, InMemoryVec
         vector_store=store,
         embeddings=embeddings,
         sparse_encoder=BM25SparseEncoder.from_dict(manifest.sparse_encoder),
+        reranker=HybridLexicalReranker(),
     )
     return retrieval, store
 
@@ -171,14 +173,21 @@ async def test_hybrid_recall_at_five_and_zero_unauthorized_chunks(tmp_path: Path
     scope_service = AccessScopeService(Settings(_env_file=None))
     dataset = json.loads((ROOT / "data" / "retrieval_evaluation.json").read_text())
     retrieved_expected = 0
+    baseline_expected = 0
     expected_total = 0
 
     for case in dataset["cases"]:
         scope = scope_service.build(user(Role(case["role"]), case["department"]))
+        reranker = retrieval._reranker  # noqa: SLF001
+        retrieval._reranker = None  # noqa: SLF001
+        baseline = await retrieval.search(case["question"], scope, top_k=5)
+        retrieval._reranker = reranker  # noqa: SLF001
         evidence = await retrieval.search(case["question"], scope, top_k=5)
         fixture_ids = {item.metadata["fixture_id"] for item in evidence}
+        baseline_fixture_ids = {item.metadata["fixture_id"] for item in baseline}
         expected = set(case["expected_fixture_ids"])
         retrieved_expected += len(fixture_ids & expected)
+        baseline_expected += len(baseline_fixture_ids & expected)
         expected_total += len(expected)
 
         assert all(
@@ -191,6 +200,7 @@ async def test_hybrid_recall_at_five_and_zero_unauthorized_chunks(tmp_path: Path
         assert all(item.evidence_id.startswith("ev_") for item in evidence)
         assert all(item.chunk_id for item in evidence)
 
+    assert retrieved_expected >= baseline_expected
     assert retrieved_expected / expected_total >= 0.80
 
 
@@ -273,6 +283,7 @@ async def test_filters_narrow_scope_and_never_broaden_it(tmp_path: Path) -> None
     assert incidents
     assert all(item.metadata["document_type"] == "incident" for item in incidents)
     assert all(item.metadata["created_date"] >= "2025-05-01" for item in incidents)
+    assert all(isinstance(item.metadata["created_date_ordinal"], int) for item in incidents)
     assert forbidden_department == []
 
 

@@ -79,6 +79,7 @@ services:
       AUTH_VIEWER_TOKEN: ${AUTH_VIEWER_TOKEN:-phase2-viewer-demo-token}
       AUTH_ANALYST_TOKEN: ${AUTH_ANALYST_TOKEN:-phase2-analyst-demo-token}
       AUTH_ADMIN_TOKEN: ${AUTH_ADMIN_TOKEN:-phase2-administrator-demo-token}
+      AUTH_APPROVER_TOKEN: ${AUTH_APPROVER_TOKEN:-phase10-approver-demo-token}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-commercial-bank-assistant}

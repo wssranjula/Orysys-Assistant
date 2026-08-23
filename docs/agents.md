@@ -1,4 +1,4 @@
-# Agent Orchestration (Phase 4)
+# Agent Orchestration
 
 The production runtime is one compiled LangGraph with a model-backed supervisor, five bounded
 branches, and a shared synthesis node. Every supervisor decision is schema-validated and visible in
@@ -24,9 +24,11 @@ uses the current request and bounded conversation context to select `direct_know
 `analysis`, `enterprise`, or `out_of_scope`. The response schema contains only that enum and uses
 LangChain's retry-capable tool strategy, avoiding unnecessary model-generated routing metadata.
 The graph maps the enum to code-defined conditional edges and generates a safe plan summary for the
-selected route; the model cannot create a route, tool, permission, or execution budget. There is
-deliberately no keyword-routing fallback. The router emits an `agent_started` event and a
-`routing_completed` event. Delegated routes additionally
+selected route; the model cannot create a route, tool, permission, or execution budget. When no
+model credential is configured, the local profile uses `DeterministicIntentRouter`, a conservative
+keyword-based classifier documented in ADR 008. Hosted deployments use `LLMIntentRouter` instead.
+The router emits an `agent_started` event and a `routing_completed` event. Delegated routes
+additionally
 emit `subagent_started` and `subagent_completed`; direct retrieval emits retrieval start/completion.
 All specialist results validate through strict Pydantic contracts before the root converts them to
 the frozen API response and citation contracts.
@@ -37,7 +39,10 @@ read-only MCP operations.
 
 The Research specialist owns the compiled, recursive, budgeted Phase 5 LangGraph described in
 [research-graph.md](research-graph.md). The root still delegates through the same small static agent
-surface; recursion occurs only inside that code-controlled specialist workflow.
+surface; recursion occurs only inside that code-controlled specialist workflow. Its planning node
+explicitly attaches the harness `TodoListMiddleware` to a planner whose sole tool is `write_todos`.
+The generated todos become bounded `ResearchTask` records; they cannot add tools, filters, budgets,
+or permissions.
 
 ## Production graph and synthesis
 
@@ -47,12 +52,10 @@ nodes. It is
 compiled with the configured checkpointer, so message state is isolated by the server-derived
 user/conversation thread ID.
 
-`OPENAI_API_KEY` is required for supervisor routing. When `AGENT_SYNTHESIS_ENABLED=true`, the
-synthesis node also uses a
-LangChain agent with provider-backed structured output. The model receives only the bounded
-specialist result and authorized evidence. Citation resolution and output validation remain
-deterministic application controls. Tests inject schema-compatible router doubles; production does
-not silently substitute deterministic routing when the model is unavailable.
+With `OPENAI_API_KEY`, supervisor routing and optional synthesis use provider-backed structured
+output. Without it, the local deterministic profile uses a conservative router so Compose can run
+without cloud credentials. The model receives only the bounded specialist result and authorized
+evidence. Citation resolution and output validation remain deterministic application controls.
 
 Graph `custom` updates are streamed directly to SSE; callback-based transitions remain only as a
 compatibility surface for tests and external adapters.

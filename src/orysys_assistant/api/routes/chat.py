@@ -13,7 +13,7 @@ from fastapi import APIRouter, Request
 from langsmith import tracing_context
 from sse_starlette.sse import EventSourceResponse
 
-from orysys_assistant.agent.models import AgentTransition
+from orysys_assistant.agent.models import AgentTransition, AnswerToken
 from orysys_assistant.agent.orchestrator import RootOrchestrator
 from orysys_assistant.api.dependencies import (
     ConversationRepositoryDependency,
@@ -100,6 +100,14 @@ async def stream_chat_events(
     request_id: UUID = request.state.request_id
     conversation_id = conversation.conversation_id
     started = perf_counter()
+    streamed_tokens = 0
+    preferences = await repository.list_preferences(context.identity.user_id)
+    preference_context = "\n".join(
+        f"Explicit preference {item.key}: {item.value}" for item in preferences
+    )
+    conversation_context = "\n\n".join(
+        item for item in (conversation.summary, preference_context) if item
+    )
     structlog.contextvars.bind_contextvars(
         conversation_id=str(conversation_id),
         user_id=context.identity.user_id,
@@ -162,7 +170,10 @@ async def stream_chat_events(
                 status=ActivityStatus.COMPLETED,
                 message=f"Loaded {len(conversation.messages)} recent conversation messages.",
                 node="conversation_memory",
-                metadata={"evidence_count": len(conversation.evidence_ids)},
+                metadata={
+                    "evidence_count": len(conversation.evidence_ids),
+                    "long_term_preference_count": len(preferences),
+                },
             ),
         )
         langsmith_client = (
@@ -179,7 +190,7 @@ async def stream_chat_events(
                 "conversation_id": str(conversation_id),
                 "role": context.identity.role.value,
                 "agent_name": orchestrator.name,
-            }
+            },
         ):
             stream_method = getattr(orchestrator, "stream", None)
             if stream_method is not None:
@@ -190,6 +201,7 @@ async def stream_chat_events(
                         context,
                         conversation.summary,
                         f"{context.identity.user_id}:{conversation_id}",
+                        preference_context,
                     ):
                         await _ensure_connected(request)
                         if isinstance(update, AgentTransition):
@@ -206,6 +218,31 @@ async def stream_chat_events(
                                     metadata=update.metadata,
                                 ),
                             )
+                        elif isinstance(update, AnswerToken):
+                            if streamed_tokens == 0:
+                                yield _sse(
+                                    "activity",
+                                    _activity(
+                                        event_type=ActivityEventType.ANSWER_STREAMING,
+                                        request_id=request_id,
+                                        conversation_id=conversation_id,
+                                        status=ActivityStatus.STARTED,
+                                        message="Response agent is generating the answer.",
+                                        agent=orchestrator.name,
+                                        node="answer_stream",
+                                    ),
+                                )
+                            yield _sse(
+                                "answer_delta",
+                                AnswerDelta(
+                                    request_id=request_id,
+                                    conversation_id=conversation_id,
+                                    sequence=streamed_tokens,
+                                    text=update.text,
+                                    provisional=True,
+                                ),
+                            )
+                            streamed_tokens += 1
                         else:
                             result = update
                 if result is None:
@@ -218,7 +255,7 @@ async def stream_chat_events(
                         payload.message,
                         context,
                         transitions.put,
-                        conversation.summary,
+                        conversation_context,
                         f"{context.identity.user_id}:{conversation_id}",
                     )
                 )
@@ -227,9 +264,7 @@ async def stream_chat_events(
                         while not agent_task.done() or not transitions.empty():
                             await _ensure_connected(request)
                             try:
-                                transition = await asyncio.wait_for(
-                                    transitions.get(), timeout=0.05
-                                )
+                                transition = await asyncio.wait_for(transitions.get(), timeout=0.05)
                             except TimeoutError:
                                 continue
                             yield _sse(
@@ -312,32 +347,34 @@ async def stream_chat_events(
             ),
         )
 
-        yield _sse(
-            "activity",
-            _activity(
-                event_type=ActivityEventType.ANSWER_STREAMING,
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=ActivityStatus.STARTED,
-                message="Streaming the grounded answer.",
-                agent=orchestrator.name,
-                node="answer_stream",
-            ),
-        )
-
-        for sequence, token in enumerate(re.findall(r"\S+\s*", result.answer)):
-            await _ensure_connected(request)
+        if streamed_tokens == 0:
+            # No model tokens were produced (deterministic profile, an injected adapter,
+            # or a synthesis failure), so replay the validated answer word by word.
             yield _sse(
-                "answer_delta",
-                AnswerDelta(
+                "activity",
+                _activity(
+                    event_type=ActivityEventType.ANSWER_STREAMING,
                     request_id=request_id,
                     conversation_id=conversation_id,
-                    sequence=sequence,
-                    text=token,
+                    status=ActivityStatus.STARTED,
+                    message="Streaming the grounded answer.",
+                    agent=orchestrator.name,
+                    node="answer_stream",
                 ),
             )
-            if settings.mock_token_delay_seconds:
-                await asyncio.sleep(settings.mock_token_delay_seconds)
+            for sequence, token in enumerate(re.findall(r"\S+\s*", result.answer)):
+                await _ensure_connected(request)
+                yield _sse(
+                    "answer_delta",
+                    AnswerDelta(
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        sequence=sequence,
+                        text=token,
+                    ),
+                )
+                if settings.mock_token_delay_seconds:
+                    await asyncio.sleep(settings.mock_token_delay_seconds)
 
         duration_ms = round((perf_counter() - started) * 1_000, 2)
         yield _sse(

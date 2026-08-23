@@ -1,4 +1,4 @@
-# Bounded Research Graph (Phase 5)
+# Bounded Research Graph
 
 The Research specialist executes complex, multi-document questions through one reusable compiled
 LangGraph. It does not create autonomous agents or expose new tools. Every retrieval worker uses the
@@ -14,14 +14,17 @@ START → normalize_scope → planner → workers → Send(worker × N) → redu
 ## Nodes
 
 - `normalize_scope` removes redundant whitespace and derives only explicit safe filters.
-- `planner` creates at most four independent tasks. Annual incident questions are partitioned by
-  quarter; other questions are partitioned by evidence type.
+- `planner` uses a tool-free model with the harness `write_todos` middleware to create at most four
+  claim-driven tasks. Tasks target causal questions, timelines, contradictions, dependencies, or
+  acceptance criteria instead of mirroring corpus folders. Invalid or unavailable model planning
+  falls back to the previous bounded evidence-type plan and emits a warning.
 - `workers` emits LangGraph `Send` commands for native map/reduce fan-out. Each worker has its own
   timeout and returns a strict reducer update, including a safe failure warning when retrieval fails.
 - `reducer` deduplicates evidence by evidence ID and findings by normalized claim, preserving all
   supporting evidence IDs.
 - `coverage_check` assesses unique evidence and successful task coverage.
-- `followup_planner` creates no more than two targeted corroboration tasks per round.
+- `followup_planner` gives the planner completed todos plus collected evidence titles and creates no
+  more than two targeted gap-closing tasks per round.
 - `finalize` marks incomplete coverage as partial and retains unresolved questions and warnings.
 
 ## Enforced defaults
@@ -59,3 +62,7 @@ Use the eight prompts in `data/hard_research_questions.json` to exercise plannin
 retrieval, evidence reduction, temporal reconciliation, and citation coverage. Recursive follow-up
 is coverage-driven: it runs when the first pass lacks sufficient authorized evidence, not merely
 because a prompt is long.
+
+The activity panel displays the generated todo list and updates each item as its bounded worker
+starts and completes. Todo generation never receives filesystem, shell, retrieval, or enterprise
+tools; only the resulting validated task text reaches workers behind the Tool Gateway.

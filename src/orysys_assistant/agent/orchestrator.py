@@ -1,6 +1,6 @@
 """Controlled root orchestration used by the API and deterministic tests."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Hashable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
@@ -18,8 +18,8 @@ from orysys_assistant.agent.models import (
     AgentRoute,
     AgentTransition,
     AnalysisExecution,
+    AnswerToken,
     EnterpriseExecution,
-    GroundedAnswerDraft,
     ResearchExecution,
 )
 from orysys_assistant.agent.router import AgentRouter
@@ -38,12 +38,32 @@ from orysys_assistant.tools.knowledge_search import KNOWLEDGE_QUERY_MAX_LENGTH
 
 TransitionSink = Callable[[AgentTransition], Awaitable[None]]
 
+MAX_ROUTE_HANDOFFS = 1
+"""How many times one request may be handed to a second specialist."""
+
+HANDOFF_ROUTES: dict[AgentRoute, AgentRoute] = {
+    # A decomposed investigation found nothing; try one broad unfiltered lookup.
+    AgentRoute.RESEARCH: AgentRoute.DIRECT_KNOWLEDGE,
+    # There is nothing to aggregate, so fall back to answering from documents.
+    AgentRoute.ANALYSIS: AgentRoute.DIRECT_KNOWLEDGE,
+    # The system of record has no matching row; the documents may still describe it.
+    AgentRoute.ENTERPRISE: AgentRoute.DIRECT_KNOWLEDGE,
+    # Deliberately no direct_knowledge escalation. An empty authorized lookup usually
+    # means the corpus holds nothing this user may read, and fanning out to research
+    # only surfaces unrelated documents that dress a clean refusal up as a partial
+    # answer. Every hand-off here narrows toward a cheaper, broader single lookup.
+}
+
 
 class RootAgentState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     question: str
     route: AgentRoute | None
     result: AgentExecutionResult | None
+    attempted_routes: list[str]
+    retry_route: AgentRoute | None
+    handoff_notes: list[str]
+    handoffs: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +72,7 @@ class RootAgentContext:
     transition_sink: TransitionSink | None = None
     conversation_summary: str = ""
     thread_id: str | None = None
+    long_term_memory: str = ""
 
 
 class RootOrchestrator:
@@ -85,27 +106,30 @@ class RootOrchestrator:
         builder.add_node("analysis", self._analysis_node)
         builder.add_node("enterprise", self._enterprise_node)
         builder.add_node("out_of_scope", self._out_of_scope_node)
+        builder.add_node("assess", self._assess_node)
         builder.add_node("synthesize", self._synthesize_node)
+        specialists: dict[Hashable, str] = {
+            AgentRoute.DIRECT_KNOWLEDGE.value: "direct_knowledge",
+            AgentRoute.RESEARCH.value: "research",
+            AgentRoute.ANALYSIS.value: "analysis",
+            AgentRoute.ENTERPRISE.value: "enterprise",
+        }
         builder.add_edge(START, "route")
         builder.add_conditional_edges(
             "route",
             self._route_after_classification,
-            {
-                AgentRoute.DIRECT_KNOWLEDGE.value: "direct_knowledge",
-                AgentRoute.RESEARCH.value: "research",
-                AgentRoute.ANALYSIS.value: "analysis",
-                AgentRoute.ENTERPRISE.value: "enterprise",
-                AgentRoute.OUT_OF_SCOPE.value: "out_of_scope",
-            },
+            {**specialists, AgentRoute.OUT_OF_SCOPE.value: "out_of_scope"},
         )
-        for node in (
-            "direct_knowledge",
-            "research",
-            "analysis",
-            "enterprise",
-            "out_of_scope",
-        ):
-            builder.add_edge(node, "synthesize")
+        # Every specialist reports back to one assessment node, which owns the single
+        # bounded hand-off. Out-of-scope has nothing to assess.
+        for node in specialists.values():
+            builder.add_edge(node, "assess")
+        builder.add_edge("out_of_scope", "synthesize")
+        builder.add_conditional_edges(
+            "assess",
+            self._route_after_assessment,
+            {**specialists, "synthesize": "synthesize"},
+        )
         builder.add_edge("synthesize", END)
         return builder.compile(checkpointer=self._checkpointer)
 
@@ -121,20 +145,17 @@ class RootOrchestrator:
         transition_sink: TransitionSink | None = None,
         conversation_summary: str = "",
         thread_id: str | None = None,
+        long_term_memory: str = "",
     ) -> AgentExecutionResult:
         final = await self.graph.ainvoke(
-            {
-                "messages": [HumanMessage(content=question)],
-                "question": question,
-                "route": None,
-                "result": None,
-            },
+            self._initial_state(question),
             config=self._graph_config(thread_id),
             context=RootAgentContext(
                 request_context=context,
                 transition_sink=transition_sink,
                 conversation_summary=conversation_summary,
                 thread_id=thread_id,
+                long_term_memory=long_term_memory,
             ),
         )
         result = final["result"]
@@ -148,8 +169,9 @@ class RootOrchestrator:
         context: TrustedRequestContext,
         conversation_summary: str = "",
         thread_id: str | None = None,
-    ) -> AsyncIterator[AgentTransition | AgentExecutionResult]:
-        """Stream native LangGraph updates followed by the final typed result."""
+        long_term_memory: str = "",
+    ) -> AsyncIterator[AgentTransition | AnswerToken | AgentExecutionResult]:
+        """Stream native LangGraph activity and answer tokens, then the typed result."""
 
         graph_context = RootAgentContext(
             request_context=context,
@@ -157,21 +179,23 @@ class RootOrchestrator:
             # summary remains a compatibility input when no checkpointer is configured.
             conversation_summary=conversation_summary if self._checkpointer is None else "",
             thread_id=thread_id,
+            long_term_memory=long_term_memory,
         )
         async for part in self.graph.astream(
-            {
-                "messages": [HumanMessage(content=question)],
-                "question": question,
-                "route": None,
-                "result": None,
-            },
+            self._initial_state(question),
             config=self._graph_config(thread_id),
             context=graph_context,
             stream_mode=["custom", "updates"],
             version="v2",
         ):
             if part["type"] == "custom":
-                yield AgentTransition.model_validate(part["data"])
+                data = part["data"]
+                token = data.get("answer_token") if isinstance(data, dict) else None
+                yield (
+                    AnswerToken(text=token)
+                    if isinstance(token, str) and token
+                    else AgentTransition.model_validate(data)
+                )
                 continue
             for node, update in part["data"].items():
                 if node != "synthesize":
@@ -179,6 +203,19 @@ class RootOrchestrator:
                 result = update.get("result") if isinstance(update, dict) else None
                 if result is not None:
                     yield AgentExecutionResult.model_validate(result)
+
+    @staticmethod
+    def _initial_state(question: str) -> dict[str, Any]:
+        return {
+            "messages": [HumanMessage(content=question)],
+            "question": question,
+            "route": None,
+            "result": None,
+            "attempted_routes": [],
+            "retry_route": None,
+            "handoff_notes": [],
+            "handoffs": 0,
+        }
 
     def _graph_config(self, thread_id: str | None) -> dict[str, Any] | None:
         if self._checkpointer is None:
@@ -199,7 +236,10 @@ class RootOrchestrator:
             ),
         )
         summary = runtime.context.conversation_summary or self._message_history(state["messages"])
-        decision = await self._router.route(state["question"], summary)
+        full_context = "\n\n".join(
+            item for item in (summary, runtime.context.long_term_memory) if item
+        )
+        decision = await self._router.route(state["question"], full_context)
         route = decision.route
         await self._emit(
             runtime.context.transition_sink,
@@ -217,9 +257,7 @@ class RootOrchestrator:
         )
         return {
             "route": route,
-            "question": self._with_conversation_context(
-                state["question"], summary
-            ),
+            "question": self._with_conversation_context(state["question"], full_context),
         }
 
     @staticmethod
@@ -306,45 +344,161 @@ class RootOrchestrator:
             )
         }
 
+    async def _assess_node(
+        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
+    ) -> dict[str, Any]:
+        """Decide whether the specialist result is usable or needs one hand-off.
+
+        The supervisor classifies intent from wording alone, so it cannot know whether
+        the corpus actually holds the answer.  This node is the feedback edge: when a
+        specialist returns no usable evidence, one different specialist gets a turn
+        before the request is given up on.
+        """
+
+        result = state["result"]
+        if result is None:
+            raise RuntimeError("The specialist node did not produce a result.")
+        attempted = [*state["attempted_routes"], result.route.value]
+        retry = self._handoff_route(result, attempted, state["handoffs"])
+        if retry is None:
+            return {
+                "attempted_routes": attempted,
+                "retry_route": None,
+                "result": self._settled_result(result, state["handoffs"]),
+            }
+
+        note = (
+            f"The {result.route.value.replace('_', ' ')} specialist found no usable evidence, "
+            f"so the request was handed off to the {retry.value.replace('_', ' ')} specialist."
+        )
+        await self._emit(
+            runtime.context.transition_sink,
+            AgentTransition(
+                event_type="handoff_completed",
+                agent=self.name,
+                node="handoff_assessment",
+                status="completed",
+                message=note,
+                metadata={
+                    "route": retry.value,
+                    "from_route": result.route.value,
+                    "handoff_hop": state["handoffs"] + 1,
+                    "plan_summary": self._plan_summary(retry),
+                },
+            ),
+        )
+        return {
+            "attempted_routes": attempted,
+            "retry_route": retry,
+            "handoffs": state["handoffs"] + 1,
+            "handoff_notes": [*state["handoff_notes"], note],
+        }
+
+    @classmethod
+    def _settled_result(
+        cls, result: AgentExecutionResult, handoffs: int
+    ) -> AgentExecutionResult:
+        """Keep the reported status honest about the specialist that had to be replaced.
+
+        A hand-off only happens because the originally selected specialist failed, so the
+        turn is never a clean success.  If the replacement also came back empty, every
+        specialist that ran found nothing and the turn is insufficient evidence.
+        """
+
+        if handoffs == 0:
+            return result
+        if cls._returned_nothing_usable(result):
+            return result.model_copy(update={"status": ResponseStatus.INSUFFICIENT_EVIDENCE})
+        if result.status is ResponseStatus.COMPLETE:
+            return result.model_copy(update={"status": ResponseStatus.PARTIAL})
+        return result
+
+    @staticmethod
+    def _route_after_assessment(state: RootAgentState) -> str:
+        retry = state["retry_route"]
+        return "synthesize" if retry is None else retry.value
+
+    @classmethod
+    def _handoff_route(
+        cls, result: AgentExecutionResult, attempted: list[str], handoffs: int
+    ) -> AgentRoute | None:
+        if handoffs >= MAX_ROUTE_HANDOFFS or not cls._returned_nothing_usable(result):
+            return None
+        candidate = HANDOFF_ROUTES.get(result.route)
+        if candidate is None or candidate.value in attempted:
+            return None
+        return candidate
+
+    @staticmethod
+    def _returned_nothing_usable(result: AgentExecutionResult) -> bool:
+        if result.route is AgentRoute.ENTERPRISE:
+            # Enterprise answers are tool payloads rather than document evidence.
+            return result.status is ResponseStatus.INSUFFICIENT_EVIDENCE
+        return not result.evidence
+
     async def _synthesize_node(self, state: RootAgentState) -> dict[str, Any]:
         result = state["result"]
         if result is None:
             raise RuntimeError("The specialist node did not produce a result.")
+        if state["handoff_notes"]:
+            result = result.model_copy(
+                update={"warnings": [*result.warnings, *state["handoff_notes"]]}
+            )
         if self._synthesizer is not None and result.route is not AgentRoute.OUT_OF_SCOPE:
-            evidence = "\n\n".join(
-                f"[{index}] {item.title}\n{unwrap_evidence(item.content)[:2_000]}"
-                for index, item in enumerate(result.evidence, start=1)
-            )
-            prompt = (
-                f"User question: {state['question']}\n\n"
-                f"Specialist result:\n{result.answer}\n\n"
-                "Authorized evidence:\n"
-                f"{evidence or 'No document evidence; use only the tool result.'}"
-            )
-            try:
-                generated = await self._synthesizer.ainvoke(
-                    {"messages": [{"role": "user", "content": prompt}]}
-                )
-                draft = GroundedAnswerDraft.model_validate(generated["structured_response"])
-                result = result.model_copy(update={"answer": draft.answer})
-            except Exception as exc:
-                result = result.model_copy(
-                    update={
-                        "status": (
-                            ResponseStatus.PARTIAL
-                            if result.status is ResponseStatus.COMPLETE
-                            else result.status
-                        ),
-                        "warnings": [
-                            *result.warnings,
-                            f"Model synthesis was unavailable: {type(exc).__name__}.",
-                        ],
-                    }
-                )
+            result = await self._synthesized(state["question"], result)
         return {
             "result": result,
             "messages": [AIMessage(content=result.answer)],
         }
+
+    async def _synthesized(
+        self, question: str, result: AgentExecutionResult
+    ) -> AgentExecutionResult:
+        """Stream the grounded answer, forwarding each chunk as it is generated.
+
+        Chunks are provisional: validation and persistence still run afterwards and the
+        terminal response remains authoritative.  A synthesis failure keeps the
+        deterministic specialist answer so the turn degrades instead of breaking.
+        """
+
+        evidence = "\n\n".join(
+            f"[{index}] {item.title}\n{unwrap_evidence(item.content)[:2_000]}"
+            for index, item in enumerate(result.evidence, start=1)
+        )
+        prompt = (
+            f"User question: {question}\n\n"
+            f"Specialist result:\n{result.answer}\n\n"
+            "Authorized evidence:\n"
+            f"{evidence or 'No document evidence; use only the tool result.'}"
+        )
+        chunks: list[str] = []
+        try:
+            async for chunk in self._synthesizer.astream(prompt):
+                chunks.append(chunk)
+                self._emit_answer_token(chunk)
+            answer = "".join(chunks).strip()
+            if not answer:
+                raise ValueError("The response agent produced an empty answer.")
+            return result.model_copy(update={"answer": answer})
+        except Exception as exc:
+            return result.model_copy(
+                update={
+                    "status": (
+                        ResponseStatus.PARTIAL
+                        if result.status is ResponseStatus.COMPLETE
+                        else result.status
+                    ),
+                    "warnings": [
+                        *result.warnings,
+                        f"Model synthesis was unavailable: {type(exc).__name__}.",
+                    ],
+                }
+            )
+
+    @staticmethod
+    def _emit_answer_token(text: str) -> None:
+        with suppress(RuntimeError):
+            get_stream_writer()({"answer_token": text})
 
     @staticmethod
     def _message_history(messages: list[AnyMessage]) -> str:
@@ -437,40 +591,8 @@ class RootOrchestrator:
         await self._subagent_transition(sink, self._enterprise.name, "started")
         execution = await self._enterprise.run(question, context, sink)
         await self._subagent_transition(sink, self._enterprise.name, "completed")
-        if not execution.result.data:
-            await self._retrieval_transition(sink, "started", 0)
-            fallback = await self._direct_toolbox.execute(
-                "knowledge_search", {"query": question, "top_k": 6}, context
-            )
-            evidence = [Evidence.model_validate(item) for item in fallback["evidence"]]
-            await self._retrieval_transition(
-                sink,
-                "completed",
-                len(evidence),
-                {
-                    "candidate_count": int(fallback.get("candidate_count", len(evidence))),
-                    "selected_evidence_count": len(evidence),
-                    "retrieval_mode": str(fallback.get("retrieval_mode", "hybrid")),
-                    "tool_name": "knowledge_search",
-                },
-            )
-            if evidence:
-                return AgentExecutionResult(
-                    route=AgentRoute.DIRECT_KNOWLEDGE,
-                    answer=(
-                        "Enterprise data was unavailable. I found these authorized documents:\n"
-                        + "\n".join(
-                            f"- {item.title}: "
-                            f"{_first_sentence(unwrap_evidence(item.content))} [{index}]"
-                            for index, item in enumerate(evidence, start=1)
-                        )
-                    ),
-                    status=ResponseStatus.PARTIAL,
-                    citations=self._citations(evidence),
-                    warnings=execution.result.warnings,
-                    evidence_ids=[item.evidence_id for item in evidence],
-                    evidence=evidence,
-                )
+        # An empty system-of-record read reports insufficient evidence; the assessment
+        # node decides whether a document lookup should be tried instead.
         return self._enterprise_response(execution)
 
     @staticmethod

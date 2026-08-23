@@ -65,6 +65,20 @@ class AuthenticationService:
                 ),
                 bearer_token=settings.auth_admin_token,
             ),
+            UserRecord(
+                identity=UserIdentity(
+                    user_id="user-admin-approver-01",
+                    username="approver@commercialbank.test",
+                    display_name="Nimal Jayasinghe",
+                    role=Role.ADMINISTRATOR,
+                    department="risk",
+                ),
+                password_salt="admin-approver-salt-v1",
+                password_digest=(
+                    "ad79749a55107da77268d66ef5d7af0fa4a70961ffb8dfeb9459a79afd816a2d"
+                ),
+                bearer_token=settings.auth_approver_token,
+            ),
         )
         self._by_username = {record.identity.username: record for record in self._records}
 

@@ -1,7 +1,8 @@
 # Activity, Trace Correlation, and Golden Evaluation
 
-Phase 8 makes the assistant's operation inspectable without exposing internal prompts, hidden
-reasoning, credentials, raw enterprise payloads, or restricted document text.
+The activity panel and golden runner make the assistant's operation inspectable without exposing
+internal prompts, hidden reasoning, credentials, raw enterprise payloads, or restricted document
+text.
 
 ## Real-time activity panel
 

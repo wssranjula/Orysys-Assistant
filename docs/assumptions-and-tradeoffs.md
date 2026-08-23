@@ -6,7 +6,7 @@
   fictional.
 - One organization and namespace are sufficient to demonstrate trusted-scope enforcement.
 - English text and Markdown source documents represent the assessment corpus.
-- All enterprise tools are reads; transaction and approval workflows are intentionally excluded.
+- Enterprise tools are reads, except the explicitly bounded, synthetic `modify_incident` approval demo.
 - PostgreSQL, Redis, Pinecone, OpenAI, and LangSmith are independently operated dependencies in a
   production topology.
 
@@ -17,17 +17,18 @@
 The API uses a model-backed LangChain supervisor with retry-capable tool-structured output for
 semantic routing. The supervisor may choose only one declared route; LangGraph edges, tool surfaces,
 identity, authorization, scope, budgets, citation resolution, and validation remain deterministic
-code. A missing or failed routing model fails the request rather than falling back to keyword
-matching. Tests inject router doubles so offline verification remains reproducible without changing
-the production routing policy.
+code. Without an OpenAI credential, the local Compose profile uses a conservative deterministic
+router. With a credential, the model-backed supervisor provides semantic routing. Tests may inject
+router doubles for focused verification.
 
 ### Simplified RLM
 
 The research specialist implements Recursive Language Model concepts as an explicit LangGraph:
 plan, bounded parallel workers, targeted retrieval, reduction, coverage checking, limited follow-up
-recursion, and final aggregation. Plans and analysis operations are code-generated rather than
-arbitrary model-generated Python. This gives the evaluator the recursion and state-management
-behavior without introducing a code-execution surface.
+recursion, and final aggregation. A model generates bounded research todos through the harness
+`write_todos` middleware, while code still owns task limits and execution. Analysis operations are
+code-generated rather than arbitrary model-generated Python. This gives the evaluator adaptive
+planning, recursion, and state management without introducing a code-execution surface.
 
 ### Offline retrieval versus Pinecone
 
@@ -39,8 +40,8 @@ floor is deliberately conservative and may return insufficient evidence rather t
 ### Memory scope
 
 Conversation turns, summaries, evidence IDs, and LangGraph checkpoints persist in PostgreSQL.
-There is no cross-conversation personalization, vectorized long-term memory, retention scheduler,
-or user-facing deletion workflow. These require governance decisions outside the POC.
+Explicit user preferences are stored separately and can be listed or deleted. There is no vectorized
+long-term memory or retention scheduler; these require governance decisions outside the POC.
 
 ### Authentication
 
@@ -70,5 +71,6 @@ deployment should use the organization's identity provider and short-lived audie
   centralized telemetry.
 - Add ingestion orchestration, document lifecycle events, index migration, reranking, and freshness
   monitoring.
-- Add human approval for any future write-capable or high-impact workflow.
+- Replace the synthetic incident-write handler with an idempotent enterprise integration before
+  enabling any real administrative action.
 - Persist feedback and connect it to regression datasets and production-quality dashboards.

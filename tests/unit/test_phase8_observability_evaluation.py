@@ -65,6 +65,35 @@ def test_activity_projection_exposes_evaluator_summary_without_reasoning() -> No
         },
         {
             "request_id": "trace-123",
+            "event_type": "research_node_completed",
+            "status": "completed",
+            "agent": "research_subagent",
+            "node": "planner",
+            "metadata": {
+                "todos": [
+                    {
+                        "id": "initial-1",
+                        "content": "Trace the PAY-1224 root-cause timeline.",
+                        "status": "pending",
+                        "hidden_reasoning": "must be removed",
+                    }
+                ]
+            },
+        },
+        {
+            "request_id": "trace-123",
+            "event_type": "research_node_completed",
+            "status": "completed",
+            "agent": "research_subagent",
+            "node": "worker:initial-1",
+            "metadata": {
+                "todo_id": "initial-1",
+                "todo_content": "Trace the PAY-1224 root-cause timeline.",
+                "todo_status": "completed",
+            },
+        },
+        {
+            "request_id": "trace-123",
             "event_type": "validation_failed",
             "status": "degraded",
             "node": "output_validation",
@@ -82,6 +111,13 @@ def test_activity_projection_exposes_evaluator_summary_without_reasoning() -> No
     assert state.selected_evidence_count == 6
     assert state.validation_status == "degraded"
     assert state.degraded is True
+    assert state.research_todos == [
+        {
+            "id": "initial-1",
+            "content": "Trace the PAY-1224 root-cause timeline.",
+            "status": "completed",
+        }
+    ]
     assert "system_prompt" not in state.plan_summary
 
 

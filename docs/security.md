@@ -1,8 +1,8 @@
-# Security Boundary (Phase 2)
+# Security Boundary
 
 ## Identity and credentials
 
-The POC has exactly three fictional users. Application user records contain only unique salts
+The POC has exactly four fictional users. Application user records contain only unique salts
 and PBKDF2-HMAC-SHA256 digests with 310,000 iterations; the public demo credentials are
 documented separately for evaluators. Authentication uses a generic
 failure message and performs hash work for unknown usernames to reduce enumeration timing
@@ -43,6 +43,11 @@ and the policy boundary is LangSmith-traceable when tracing is enabled.
 | MCP read | no | yes | yes |
 | administrative tools | no | no | yes |
 | restricted documents | no | no | yes |
+
+The approval endpoints require the `administrative tools` capability. A pending synthetic incident
+change may be approved or rejected only by an administrator whose user ID differs from the
+requester. Approval records persist in PostgreSQL in the Compose profile; the write handler itself
+remains a synthetic POC implementation.
 
 ## Tool gateway
 

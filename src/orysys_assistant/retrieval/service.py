@@ -9,6 +9,7 @@ from langsmith import traceable
 from orysys_assistant.domain.errors import RetrievalUnavailableError
 from orysys_assistant.retrieval.embeddings import EmbeddingProvider
 from orysys_assistant.retrieval.models import Evidence, SearchFilters, SearchMatch
+from orysys_assistant.retrieval.reranking import Reranker
 from orysys_assistant.retrieval.sparse_encoding import BM25SparseEncoder
 from orysys_assistant.retrieval.vector_store import VectorStore
 from orysys_assistant.security.models import AccessScope
@@ -36,6 +37,7 @@ class RetrievalService:
         sparse_weight: float = 0.35,
         candidate_count: int = 20,
         minimum_sparse_score: float = 0.1,
+        reranker: Reranker | None = None,
     ) -> None:
         if abs(dense_weight + sparse_weight - 1) > 1e-9:
             raise ValueError("dense and sparse weights must sum to 1")
@@ -46,6 +48,7 @@ class RetrievalService:
         self._sparse_weight = sparse_weight
         self._candidate_count = candidate_count
         self._minimum_sparse_score = minimum_sparse_score
+        self._reranker = reranker
 
     @traceable(name="hybrid-knowledge-retrieval", run_type="retriever")
     async def search(
@@ -87,11 +90,16 @@ class RetrievalService:
         dense_matches = dense_result
         sparse_matches = [] if sparse_degraded else cast(list[SearchMatch], sparse_result)
         candidate_count = len({item.id for item in dense_matches + sparse_matches})
-        evidence = self._combine(dense_matches, sparse_matches, top_k)
+        evidence = self._combine(dense_matches, sparse_matches)
         if not sparse_degraded:
             evidence = [
                 item for item in evidence if (item.sparse_score or 0) >= self._minimum_sparse_score
             ]
+        evidence = (
+            self._reranker.rerank(query, evidence, top_k)
+            if self._reranker is not None
+            else evidence[:top_k]
+        )
         evidence = [
             item.model_copy(
                 update={
@@ -129,16 +137,19 @@ class RetrievalService:
         if filters.document_type:
             expressions.append({"document_type": {"$eq": filters.document_type}})
         if filters.created_after:
-            expressions.append({"created_date": {"$gte": filters.created_after.isoformat()}})
+            expressions.append(
+                {"created_date_ordinal": {"$gte": filters.created_after.toordinal()}}
+            )
         if filters.created_before:
-            expressions.append({"created_date": {"$lte": filters.created_before.isoformat()}})
+            expressions.append(
+                {"created_date_ordinal": {"$lte": filters.created_before.toordinal()}}
+            )
         return expressions[0] if len(expressions) == 1 else {"$and": expressions}
 
     def _combine(
         self,
         dense_matches: list[SearchMatch],
         sparse_matches: list[SearchMatch],
-        top_k: int,
     ) -> list[Evidence]:
         dense_normalized = _normalize(dense_matches)
         sparse_normalized = _normalize(sparse_matches)
@@ -152,7 +163,7 @@ class RetrievalService:
                 + self._sparse_weight * sparse_normalized.get(record_id, 0)
             ),
             reverse=True,
-        )[:top_k]
+        )
 
         evidence = []
         for record_id in ranked:

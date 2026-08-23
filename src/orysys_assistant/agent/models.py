@@ -48,8 +48,11 @@ class ResearchResult(AgentModel):
 class ResearchTask(AgentModel):
     task_id: str
     question: str
+    search_query: str | None = None
     filters: SearchFilters = Field(default_factory=SearchFilters)
     expected_output: str
+    required_identifiers: list[str] = Field(default_factory=list)
+    minimum_evidence: int = Field(default=1, ge=1, le=12)
 
 
 class ResearchPlan(AgentModel):
@@ -64,6 +67,9 @@ class ResearchTaskResult(AgentModel):
     findings: list[Finding] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     warning: str | None = None
+    coverage_satisfied: bool = False
+    failure_kind: str | None = None
+    retryable: bool = False
 
 
 class AnalysisResult(AgentModel):
@@ -104,7 +110,11 @@ class AgentExecutionResult(AgentModel):
     evidence: list[Evidence] = Field(default_factory=list)
 
 
-class GroundedAnswerDraft(AgentModel):
-    """Model-generated prose; citations remain resolved by deterministic application code."""
+class AnswerToken(AgentModel):
+    """One provisional slice of generated prose.
 
-    answer: str = Field(min_length=1, max_length=20_000)
+    Emitted while the response agent is still writing, so the API can forward it
+    before the turn is validated.  The terminal response stays authoritative.
+    """
+
+    text: str = Field(min_length=1, max_length=8_000)

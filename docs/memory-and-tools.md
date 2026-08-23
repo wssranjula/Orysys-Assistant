@@ -1,7 +1,7 @@
-# Conversation Memory and Enterprise Tools (Phase 6)
+# Conversation Memory and Enterprise Tools
 
-Phase 6 adds durable multi-turn state and the remaining read-only tools without moving security
-decisions into prompts.
+Conversation memory, explicit preferences, and the remaining read-only tools keep security decisions
+outside prompts.
 
 ## Conversation ownership and storage
 
@@ -21,6 +21,11 @@ not written to conversation memory. PostgreSQL is the Compose/deployment backend
 repository and checkpointer are deterministic local-test seams. Checkpoint serialization disables
 pickle fallback and explicitly permits only the application state model classes required by the
 research graph.
+
+Explicit long-term preferences are stored separately from conversation messages. A caller can list,
+write, or delete only their own preferences through `/v1/memory/preferences`; consent is explicit
+on writes. Preferences are supplied as a distinct bounded context block, not merged into raw chat
+history.
 
 ## Controlled structured analysis
 
