@@ -12,8 +12,8 @@ without coupling domain logic to a single SDK.
 
 Use OpenAI initially for chat and embeddings. Configure model names through the environment and
 hide provider calls behind chat and embedding adapters. Use a stronger configurable model for
-root/reducer work and permit a smaller model for classification or workers after correctness is
-measured. Do not implement provider failover in the POC.
+research and synthesis and permit a smaller model for routing and focused lookups after correctness
+is measured. Do not implement provider failover in the POC.
 
 ## Consequences
 

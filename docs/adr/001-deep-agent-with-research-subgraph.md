@@ -1,6 +1,6 @@
 # ADR 001: Deep Agent with a bounded research subgraph
 
-- Status: Superseded by ADR 007
+- Status: Superseded by ADR 007 and ADR 009
 - Date: 2026-08-22
 
 ## Context
