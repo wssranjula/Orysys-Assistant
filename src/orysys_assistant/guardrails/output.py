@@ -103,10 +103,20 @@ class OutputValidator:
 
     @staticmethod
     def _repair_once(result: AgentExecutionResult, reason: str) -> AgentExecutionResult | None:
+        """Append the sources the answer drew on but did not mark.
+
+        A specialist writes its own prose and rarely marks every record it was shown, so
+        a partial marker set is a formatting gap rather than a grounding failure. Listing
+        the unmarked sources keeps the ledger complete without editing the claim itself;
+        a marker pointing at evidence that is not in the ledger is still a hard failure.
+        """
+
         if not result.citations:
             return None
-        if not _CITATION_MARKER.search(result.answer):
-            markers = " ".join(f"[{citation.citation_id}]" for citation in result.citations)
+        marked = set(_CITATION_MARKER.findall(result.answer))
+        unmarked = [item for item in result.citations if item.citation_id not in marked]
+        if unmarked:
+            markers = " ".join(f"[{citation.citation_id}]" for citation in unmarked)
             return result.model_copy(update={"answer": f"{result.answer}\n\nSources: {markers}"})
         if "citation" in reason.lower() or "evidence" in reason.lower():
             # A model-backed deployment can replace this no-op candidate with one constrained

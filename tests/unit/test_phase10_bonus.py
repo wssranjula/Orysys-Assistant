@@ -1,9 +1,10 @@
 from typing import Any
 
 import pytest
+from conftest import scripted_model, text_turn, tool_turn
 
 from orysys_assistant.agent.approval_graph import ApprovalService, ApprovalStatus
-from orysys_assistant.agent.research_graph import ResearchLimits, ResearchWorkflow
+from orysys_assistant.agent.research_agent import ResearchLimits, ResearchSubagent
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import AuthorizationError, InvalidRequestError
@@ -118,8 +119,19 @@ async def test_human_approval_executes_once_and_rejection_has_no_side_effect() -
 
 
 @pytest.mark.asyncio
-async def test_all_worker_failures_open_circuit_without_recursive_fanout() -> None:
+async def test_shared_dependency_failure_degrades_instead_of_cascading() -> None:
+    """A dependency outage must cost the turn its evidence, not the whole request.
+
+    Every retrieval fails here, which is the butterfly-effect case: without containment
+    at the tool boundary, one broken backend would surface as an unhandled exception in
+    the API stream instead of an honest partial answer.
+    """
+
+    calls = 0
+
     async def failing_handler(parameters: Any, request_context: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
         raise OSError("shared retrieval dependency unavailable")
 
     gateway = ToolGateway(AuthorizationPolicy())
@@ -131,32 +143,37 @@ async def test_all_worker_failures_open_circuit_without_recursive_fanout() -> No
             handler=failing_handler,
         )
     )
-    workflow = ResearchWorkflow(
+    model = scripted_model(
+        tool_turn(
+            ("knowledge_search", {"query": "payment incidents"}),
+            ("knowledge_search", {"query": "payment policies"}),
+            ("knowledge_search", {"query": "payment runbooks"}),
+        ),
+        text_turn("SUMMARY: No authorized evidence could be retrieved.\nUNRESOLVED: Everything."),
+    )
+    agent = ResearchSubagent(
         ScopedToolbox(gateway, frozenset({"knowledge_search"})),
         ResearchLimits(
-            max_initial_tasks=4,
-            max_followup_tasks=2,
-            max_recursion_depth=2,
-            max_parallel_workers=4,
-            max_total_tool_calls=20,
-            max_chunks_per_worker=6,
-            worker_timeout_seconds=1,
+            max_tool_calls=20,
+            max_model_calls=4,
+            max_chunks_per_search=6,
             overall_timeout_seconds=5,
         ),
+        model,
     )
     transitions = []
 
     async def capture(transition: Any) -> None:
         transitions.append(transition)
 
-    result = await workflow.run(
+    result = await agent.run(
         "Compare payment incidents, policies, and runbooks", context(Role.ANALYST), capture
     )
 
-    assert result.result.partial is True
-    assert any("contain" in warning for warning in result.result.warnings)
-    assert not any(item.node == "followup_planner" for item in transitions)
-    reducer = next(
-        item for item in transitions if item.node == "reducer" and item.status == "completed"
-    )
-    assert reducer.metadata["failure_circuit_open"] is True
+    assert calls == 3
+    assert result.evidence == []
+    assert result.grounded is False
+    assert any("unavailable" in warning for warning in result.warnings)
+    degraded = [item for item in transitions if item.status == "degraded"]
+    assert len(degraded) == 3
+    assert all(item.metadata["error_type"] == "OSError" for item in degraded)

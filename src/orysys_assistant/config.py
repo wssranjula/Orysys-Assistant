@@ -38,14 +38,15 @@ class Settings(BaseSettings):
     retrieval_retry_attempts: int = Field(default=2, ge=0, le=3)
     retrieval_reranking_enabled: bool = True
     retrieval_reranker_lexical_weight: float = Field(default=0.25, ge=0, le=1)
-    research_max_initial_tasks: int = Field(default=4, gt=0, le=8)
-    research_max_followup_tasks: int = Field(default=2, ge=0, le=4)
-    research_max_recursion_depth: int = Field(default=2, ge=0, le=4)
-    research_max_parallel_workers: int = Field(default=3, gt=0, le=8)
     research_max_total_tool_calls: int = Field(default=20, gt=0, le=50)
+    research_max_model_calls: int = Field(default=12, gt=0, le=40)
     research_max_chunks_per_worker: int = Field(default=6, gt=0, le=12)
-    research_worker_timeout_seconds: float = Field(default=25, gt=0, le=60)
     research_overall_timeout_seconds: float = Field(default=90, gt=0, le=180)
+    research_summarization_token_trigger: int = Field(default=40_000, gt=0, le=200_000)
+    specialist_max_tool_calls: int = Field(default=6, gt=0, le=20)
+    specialist_max_model_calls: int = Field(default=5, gt=0, le=15)
+    root_max_tool_calls: int = Field(default=8, gt=0, le=20)
+    root_max_model_calls: int = Field(default=6, gt=0, le=15)
     embedding_model: str = "text-embedding-3-small"
     embedding_dimension: int = Field(default=1536, gt=0)
     memory_backend: str = "memory"
@@ -75,7 +76,6 @@ class Settings(BaseSettings):
     langsmith_project: str = "commercial-bank-assistant"
     openai_api_key: str | None = None
     agent_model: str = "gpt-5-mini"
-    agent_synthesis_enabled: bool = True
     embedding_provider: str = "openai"
 
     mock_token_delay_seconds: float = Field(default=0.025, ge=0, le=2)

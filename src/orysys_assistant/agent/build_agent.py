@@ -1,31 +1,33 @@
-"""Factory for the single production LangGraph agent runtime."""
+"""Factory for the single production agent runtime."""
 
 from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from orysys_assistant.agent.orchestrator import RootOrchestrator
-from orysys_assistant.agent.research_graph import ResearchLimits
-from orysys_assistant.agent.research_planner import build_todo_research_planner
-from orysys_assistant.agent.router import (
-    AgentRouter,
-    DeterministicIntentRouter,
-    LLMIntentRouter,
-    RouteDecision,
-)
+from orysys_assistant.agent.research_agent import ResearchLimits, ResearchSubagent
 from orysys_assistant.agent.subagents import (
     AnalysisSubagent,
     EnterpriseToolSubagent,
-    ResearchSubagent,
+    KnowledgeSubagent,
 )
-from orysys_assistant.agent.synthesis import StreamingAnswerSynthesizer
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
+from orysys_assistant.domain.errors import InvalidRequestError
 from orysys_assistant.tools.gateway import ToolGateway
+
+ENTERPRISE_TOOLS = frozenset(
+    {
+        "get_employee",
+        "search_employees",
+        "get_service",
+        "search_services",
+        "get_incident",
+        "search_incidents",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,103 +35,70 @@ class AgentDependencies:
     gateway: ToolGateway
     settings: Settings | None = None
     checkpointer: Any = None
-    router: AgentRouter | None = None
+    model: Any = None
+    """Chat model for the root loop and every specialist. Injected directly by tests and
+    evaluation runs so agent behaviour can be exercised without a provider credential."""
 
 
 def build_root_orchestrator(dependencies: AgentDependencies) -> RootOrchestrator:
+    """Wire the root agent to four specialists, each holding its own scoped toolbox.
+
+    Tool visibility is decided here and nowhere else. A specialist can only ever call
+    what its ``ScopedToolbox`` publishes, so the root's autonomy is bounded by which
+    specialist it consults rather than by what it is asked not to do.
+    """
+
     gateway = dependencies.gateway
     settings = dependencies.settings or Settings.model_construct()
-    direct = ScopedToolbox(gateway, frozenset({"knowledge_search"}))
-    analysis = AnalysisSubagent(
-        ScopedToolbox(gateway, frozenset({"knowledge_search", "structured_analysis"}))
-    )
-    enterprise = EnterpriseToolSubagent(
-        ScopedToolbox(
-            gateway,
-            frozenset(
-                {
-                    "get_employee",
-                    "search_employees",
-                    "get_service",
-                    "search_services",
-                    "get_incident",
-                    "search_incidents",
-                }
-            ),
+    model = dependencies.model or _provider_model(settings)
+    if model is None:
+        raise InvalidRequestError(
+            "The assistant requires a chat model. Configure OPENAI_API_KEY or inject a model."
         )
-    )
-    model = None
-    router = dependencies.router
-    if router is None:
-        if not settings.openai_api_key:
-            router = DeterministicIntentRouter()
-        else:
-            model = ChatOpenAI(
-                model=settings.agent_model,
-                api_key=SecretStr(settings.openai_api_key),
-                max_retries=settings.llm_retry_attempts,
-                timeout=settings.request_timeout_seconds,
-            )
-            router = LLMIntentRouter(
-                create_agent(
-                    model=model,
-                    tools=[],
-                    response_format=ToolStrategy(
-                        RouteDecision,
-                        handle_errors=(
-                            "Return exactly one valid route: direct_knowledge, research, analysis, "
-                            "enterprise, or out_of_scope."
-                        ),
-                    ),
-                    system_prompt=(
-                        "You are the supervisor for an enterprise knowledge assistant. "
-                        "Select exactly one route based on the user's intent and "
-                        "conversation context: "
-                        "direct_knowledge for a focused policy or factual knowledge lookup; "
-                        "research for multi-source investigation, comparison, recurring patterns, "
-                        "or broad synthesis; analysis for counts, percentages, trends, "
-                        "distributions, "
-                        "or other structured aggregation; enterprise for employee directory, "
-                        "service catalog, "
-                        "ownership, on-call, or incident-system record lookups; out_of_scope for "
-                        "unrelated general knowledge, entertainment, personal advice, creative "
-                        "writing, or requests outside the assistant's approved read-only duties. "
-                        "Use out_of_scope for greetings and questions about what the assistant can "
-                        "do "
-                        "so they receive the capabilities response. A request to investigate or "
-                        "synthesize across multiple document families—such as incidents, meeting "
-                        "notes, runbooks, architecture, policies, or specifications—is research, "
-                        "even when it mentions incident records. Enterprise is only for a focused "
-                        "system-of-record lookup. Return only the structured RouteDecision route "
-                        "enum."
-                    ),
-                    name="supervisor-router",
-                )
-            )
 
+    knowledge = KnowledgeSubagent(
+        ScopedToolbox(gateway, frozenset({"knowledge_search"})),
+        model,
+        max_tool_calls=settings.specialist_max_tool_calls,
+        max_model_calls=settings.specialist_max_model_calls,
+    )
     research = ResearchSubagent(
         ScopedToolbox(gateway, frozenset({"knowledge_search"})),
         ResearchLimits.from_settings(settings),
+        model,
         dependencies.checkpointer,
-        build_todo_research_planner(model) if model is not None else None,
+    )
+    analysis = AnalysisSubagent(
+        ScopedToolbox(gateway, frozenset({"knowledge_search", "structured_analysis"})),
+        model,
+        max_tool_calls=settings.specialist_max_tool_calls + 2,
+        max_model_calls=settings.specialist_max_model_calls + 1,
+    )
+    enterprise = EnterpriseToolSubagent(
+        ScopedToolbox(gateway, ENTERPRISE_TOOLS),
+        model,
+        max_tool_calls=settings.specialist_max_tool_calls,
+        max_model_calls=settings.specialist_max_model_calls,
     )
 
-    synthesizer = None
-    if settings.agent_synthesis_enabled and settings.openai_api_key:
-        if model is None:
-            model = ChatOpenAI(
-                model=settings.agent_model,
-                api_key=SecretStr(settings.openai_api_key),
-                max_retries=settings.llm_retry_attempts,
-                timeout=settings.request_timeout_seconds,
-            )
-        synthesizer = StreamingAnswerSynthesizer(model)
     return RootOrchestrator(
-        router=router,
-        direct_toolbox=direct,
+        model=model,
+        knowledge=knowledge,
         research=research,
         analysis=analysis,
         enterprise=enterprise,
         checkpointer=dependencies.checkpointer,
-        synthesizer=synthesizer,
+        max_tool_calls=settings.root_max_tool_calls,
+        max_model_calls=settings.root_max_model_calls,
+    )
+
+
+def _provider_model(settings: Settings) -> Any:
+    if not settings.openai_api_key:
+        return None
+    return ChatOpenAI(
+        model=settings.agent_model,
+        api_key=SecretStr(settings.openai_api_key),
+        max_retries=settings.llm_retry_attempts,
+        timeout=settings.request_timeout_seconds,
     )

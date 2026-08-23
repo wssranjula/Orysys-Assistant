@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from conftest import scripted_model, text_turn, tool_turn
 
 from orysys_assistant.agent.models import (
     AgentExecutionResult,
@@ -13,7 +14,6 @@ from orysys_assistant.agent.models import (
     AgentTransition,
     AnswerToken,
 )
-from orysys_assistant.agent.router import RouteDecision
 from orysys_assistant.api.routes import chat as chat_routes
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.models import Citation
@@ -26,19 +26,6 @@ TOKENS = {
     "administrator": "phase2-administrator-demo-token",
     "approver": "phase10-approver-demo-token",
 }
-
-
-class ScenarioRouter:
-    routes = {
-        "What does the remote-work policy allow?": AgentRoute.DIRECT_KNOWLEDGE,
-        "Count incidents by document type.": AgentRoute.ANALYSIS,
-        "Explain the restricted fraud investigation playbook.": AgentRoute.DIRECT_KNOWLEDGE,
-        "Tell me a joke about databases.": AgentRoute.OUT_OF_SCOPE,
-    }
-
-    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
-        route = self.routes[question]
-        return RouteDecision(route=route)
 
 
 class FakeOrchestrator:
@@ -627,7 +614,51 @@ async def test_end_to_end_api_agent_retrieval_for_each_role() -> None:
         log_level="WARNING",
         _env_file=None,
     )
-    application = create_app(settings, agent_router=ScenarioRouter())
+    # One script covers four scenarios in order, replaying the root's turns and the
+    # specialist's turns as they execute: a knowledge lookup, a retrieval plus
+    # aggregation, a second knowledge lookup, and a request the root declines to
+    # delegate. Every loop is real, so routing, retrieval, RBAC, and citation
+    # resolution are all genuinely exercised end to end.
+    application = create_app(
+        settings,
+        agent_model=scripted_model(
+            tool_turn(("consult_knowledge_specialist", {"request": "What does the policy allow?"})),
+            tool_turn(("knowledge_search", {"query": "remote work policy"})),
+            text_turn("Remote work is permitted for approved roles."),
+            text_turn("Remote work is permitted for approved roles [1]."),
+            tool_turn(
+                ("consult_analysis_specialist", {"request": "Count incidents by document type."})
+            ),
+            tool_turn(
+                (
+                    "knowledge_search",
+                    {"query": "payment incident root cause", "document_type": "incident"},
+                )
+            ),
+            tool_turn(
+                (
+                    "structured_analysis",
+                    {
+                        "operation": "count_by",
+                        "field": "document_type",
+                        "records": [{"document_type": "incident"}, {"document_type": "incident"}],
+                    },
+                )
+            ),
+            text_turn("Every retrieved record is an incident document."),
+            text_turn("Every retrieved record is an incident document [1]."),
+            tool_turn(
+                (
+                    "consult_knowledge_specialist",
+                    {"request": "Explain the fraud investigation playbook."},
+                )
+            ),
+            tool_turn(("knowledge_search", {"query": "fraud investigation playbook"})),
+            text_turn("The playbook defines the investigation steps."),
+            text_turn("The restricted fraud playbook defines the investigation steps [1]."),
+            text_turn("I can only help with approved internal lookups."),
+        ),
+    )
     transport = httpx.ASGITransport(app=application)
     scenarios = {
         "viewer": "What does the remote-work policy allow?",

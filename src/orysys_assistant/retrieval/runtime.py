@@ -28,7 +28,6 @@ from orysys_assistant.tools.gateway import ToolGateway
 
 if TYPE_CHECKING:
     from orysys_assistant.agent.orchestrator import RootOrchestrator
-    from orysys_assistant.agent.router import AgentRouter
     from orysys_assistant.tools.mcp_client import EnterpriseClient
 
 
@@ -151,14 +150,14 @@ class AgentRuntimeManager:
         memory_runtime: MemoryRuntime,
         project_root: Path | None = None,
         enterprise_client: "EnterpriseClient | None" = None,
-        agent_router: "AgentRouter | None" = None,
+        agent_model: object | None = None,
     ) -> None:
         self._settings = settings
         self._gateway = gateway
         self._memory_runtime = memory_runtime
         self._project_root = project_root
         self._enterprise_client = enterprise_client
-        self._agent_router = agent_router
+        self._agent_model = agent_model
         self._lock = asyncio.Lock()
         self._runtime: RetrievalRuntime | None = None
         self._orchestrator: RootOrchestrator | None = None
@@ -211,7 +210,7 @@ class AgentRuntimeManager:
                             self._gateway,
                             self._settings,
                             self._memory_runtime.checkpointer,
-                            self._agent_router,
+                            self._agent_model,
                         )
                     )
         return self._orchestrator

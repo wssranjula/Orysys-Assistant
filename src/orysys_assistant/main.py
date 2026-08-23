@@ -32,7 +32,6 @@ from orysys_assistant.tools.admin import DummyIncidentWriteStore, modify_inciden
 from orysys_assistant.tools.gateway import ToolGateway
 
 if TYPE_CHECKING:
-    from orysys_assistant.agent.router import AgentRouter
     from orysys_assistant.tools.mcp_client import EnterpriseClient
 
 
@@ -40,7 +39,7 @@ def create_app(
     settings: Settings | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     enterprise_client: "EnterpriseClient | None" = None,
-    agent_router: "AgentRouter | None" = None,
+    agent_model: object | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
@@ -62,7 +61,7 @@ def create_app(
         tool_gateway,
         memory_runtime,
         enterprise_client=enterprise_client,
-        agent_router=agent_router,
+        agent_model=agent_model,
     )
 
     @asynccontextmanager

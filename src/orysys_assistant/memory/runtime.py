@@ -22,10 +22,8 @@ def _checkpoint_serializer() -> JsonPlusSerializer:
             ("orysys_assistant.security.models", "AccessScope"),
             ("orysys_assistant.retrieval.models", "SearchFilters"),
             ("orysys_assistant.retrieval.models", "Evidence"),
-            ("orysys_assistant.agent.models", "Finding"),
-            ("orysys_assistant.agent.models", "ResearchPlan"),
-            ("orysys_assistant.agent.models", "ResearchTask"),
-            ("orysys_assistant.agent.models", "ResearchTaskResult"),
+            ("orysys_assistant.domain.models", "Citation"),
+            ("orysys_assistant.agent.models", "AgentExecutionResult"),
         ],
     )
 

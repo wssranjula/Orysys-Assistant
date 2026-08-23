@@ -1,11 +1,17 @@
-from collections.abc import AsyncIterator
+"""Root delegation: which specialist runs, what it may reach, and what the turn reports.
+
+The root is a model-driven loop now, so routing is exercised by scripting the delegation
+tools it chooses rather than by stubbing a classifier. One script drives the whole
+request: the root's turns and the specialist's turns are replayed in execution order,
+while the real gateway, the real budgets, and the real specialists run underneath.
+"""
+
 from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain.agents.structured_output import ToolStrategy
+from conftest import scripted_model, text_turn, tool_turn
 
-import orysys_assistant.agent.build_agent as agent_factory
 from orysys_assistant.agent.build_agent import (
     AgentDependencies,
     build_root_orchestrator,
@@ -16,11 +22,14 @@ from orysys_assistant.agent.models import (
     AgentTransition,
     AnswerToken,
 )
-from orysys_assistant.agent.orchestrator import RootOrchestrator
-from orysys_assistant.agent.router import DeterministicIntentRouter, LLMIntentRouter, RouteDecision
+from orysys_assistant.agent.orchestrator import (
+    ROOT_QUESTION_MAX_CHARACTERS,
+    RootOrchestrator,
+    _with_conversation_context,
+)
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
-from orysys_assistant.domain.errors import AuthorizationError
+from orysys_assistant.domain.errors import AuthorizationError, InvalidRequestError
 from orysys_assistant.domain.models import ResponseStatus, Role
 from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.retrieval.models import Evidence
@@ -30,13 +39,18 @@ from orysys_assistant.security.authorization import AuthorizationPolicy, Capabil
 from orysys_assistant.security.models import TrustedRequestContext, UserIdentity
 from orysys_assistant.tools.enterprise import SearchServicesInput, enterprise_tool_specs
 from orysys_assistant.tools.gateway import ToolGateway, ToolSpec
-from orysys_assistant.tools.knowledge_search import (
-    KNOWLEDGE_QUERY_MAX_LENGTH,
-    KnowledgeSearchInput,
-    knowledge_search_spec,
-)
+from orysys_assistant.tools.knowledge_search import KnowledgeSearchInput, knowledge_search_spec
 from orysys_assistant.tools.mcp_client import InMemoryEnterpriseClient
 from orysys_assistant.tools.python_analysis import python_analysis_spec
+
+KNOWLEDGE = "consult_knowledge_specialist"
+RESEARCH = "consult_research_specialist"
+ANALYSIS = "consult_analysis_specialist"
+ENTERPRISE = "consult_enterprise_specialist"
+
+
+def settings() -> Settings:
+    return Settings(openai_api_key=None, _env_file=None)
 
 
 def context(role: Role) -> TrustedRequestContext:
@@ -54,177 +68,127 @@ def context(role: Role) -> TrustedRequestContext:
     )
 
 
-class TestRouter:
-    routes = {
-        "What is the remote working policy?": AgentRoute.DIRECT_KNOWLEDGE,
-        "Investigate payment outages across the last year.": AgentRoute.RESEARCH,
-        "Count payment incidents by root cause.": AgentRoute.ANALYSIS,
-        "Who owns the payment service?": AgentRoute.ENTERPRISE,
-        "Investigate recurring payment incidents across sources.": AgentRoute.RESEARCH,
-        "Tell me a joke about databases.": AgentRoute.OUT_OF_SCOPE,
-    }
-
-    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
-        route = self.routes.get(question, AgentRoute.DIRECT_KNOWLEDGE)
-        return RouteDecision(route=route)
+def delegate(tool_name: str, request: str = "objective") -> Any:
+    return tool_turn((tool_name, {"request": request}))
 
 
-def test_route_decision_contains_only_the_branch_enum() -> None:
-    schema = RouteDecision.model_json_schema()
+async def capture_into(events: list[Any]) -> Any:
+    async def capture(transition: Any) -> None:
+        events.append(transition)
 
-    assert set(schema["properties"]) == {"route"}
+    return capture
 
 
-def test_conversation_context_fits_the_knowledge_search_contract() -> None:
+def root_tool_names(orchestrator: RootOrchestrator) -> set[str]:
+    node = orchestrator.graph.nodes["tools"]
+    runnable = getattr(node, "bound", None) or getattr(node, "runnable", None)
+    return set(getattr(runnable, "tools_by_name", {}))
+
+
+def test_conversation_context_fits_the_root_question_contract() -> None:
     question = "Were there any incidents related to attachments?"
     summary = "older context " * 1_000 + "most recent attachment discussion"
 
-    query = RootOrchestrator._with_conversation_context(question, summary)
+    prompt = _with_conversation_context(question, summary)
 
-    assert len(query) == KNOWLEDGE_QUERY_MAX_LENGTH
-    assert query.startswith(question)
-    assert query.endswith("most recent attachment discussion")
-    assert KnowledgeSearchInput(query=query).query == query
+    assert len(prompt) == ROOT_QUESTION_MAX_CHARACTERS
+    assert prompt.startswith(question)
+    assert prompt.endswith("most recent attachment discussion")
 
 
 def test_long_current_question_is_bounded_without_conversation_context() -> None:
-    query = RootOrchestrator._with_conversation_context("q" * 8_000, "")
+    prompt = _with_conversation_context("q" * 20_000, "")
 
-    assert len(query) == KNOWLEDGE_QUERY_MAX_LENGTH
-    assert KnowledgeSearchInput(query=query).query == query
-
-
-@pytest.mark.asyncio
-async def test_llm_router_validates_the_supervisor_structured_decision() -> None:
-    class FakeRoutingAgent:
-        def __init__(self) -> None:
-            self.request: dict[str, Any] = {}
-
-        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
-            self.request = request
-            return {
-                "structured_response": {
-                    "route": "research",
-                }
-            }
-
-    agent = FakeRoutingAgent()
-    decision = await LLMIntentRouter(agent).route(
-        "Would the same control apply to both historical incidents?",
-        "The prior turn discussed two payment services.",
-    )
-
-    assert decision.route is AgentRoute.RESEARCH
-    prompt = agent.request["messages"][0]["content"]
-    assert "historical incidents" in prompt
-    assert "two payment services" in prompt
+    assert len(prompt) == ROOT_QUESTION_MAX_CHARACTERS
 
 
-@pytest.mark.asyncio
-async def test_enterprise_misroute_is_corrected_for_project_orion_document_research() -> None:
-    class MisroutingAgent:
-        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
-            return {"structured_response": {"route": "enterprise"}}
+def test_factory_refuses_to_build_without_a_chat_model() -> None:
+    """Every loop is model-driven now, so a credential is not optional.
 
-    question = (
-        "Investigate the 2026 Project Orion payment failures across incidents, meeting notes, "
-        "runbooks, and architecture. Which controls were reported complete but later proved "
-        "incomplete, and what runtime evidence changed that assessment?"
-    )
+    Failing at construction is the honest outcome: a silent keyword-matching fallback
+    would answer with a different system than the one the deployment is configured for.
+    """
 
-    decision = await LLMIntentRouter(MisroutingAgent()).route(question)
+    with pytest.raises(InvalidRequestError) as failure:
+        build_root_orchestrator(
+            AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings())
+        )
 
-    assert decision.route is AgentRoute.RESEARCH
+    assert "chat model" in str(failure.value)
 
 
-@pytest.mark.asyncio
-async def test_focused_incident_system_lookup_remains_enterprise() -> None:
-    class EnterpriseAgent:
-        async def ainvoke(self, request: dict[str, Any]) -> dict[str, Any]:
-            return {"structured_response": {"route": "enterprise"}}
+def test_root_can_only_reach_the_four_specialists() -> None:
+    """The root holds no capability of its own; delegation is its entire tool surface.
 
-    decision = await LLMIntentRouter(EnterpriseAgent()).route(
-        "Look up incident INC-2025-001 in the incident system."
-    )
-
-    assert decision.route is AgentRoute.ENTERPRISE
-
-
-@pytest.mark.asyncio
-async def test_local_factory_uses_deterministic_router_without_model_credentials() -> None:
-    settings = Settings(
-        openai_api_key=None,
-        agent_synthesis_enabled=False,
-        _env_file=None,
-    )
+    This is the boundary the whole design rests on. The root model chooses freely among
+    specialists, but it cannot reach a document, a record, a file, or a shell, so its
+    autonomy is bounded by which specialist it consults rather than by instruction.
+    """
 
     orchestrator = build_root_orchestrator(
-        AgentDependencies(ToolGateway(AuthorizationPolicy()), settings=settings)
-    )
-
-    assert isinstance(orchestrator._router, DeterministicIntentRouter)
-    assert (
-        await orchestrator._router.route("Count incidents by category.")
-    ).route is AgentRoute.ANALYSIS
-
-
-def test_production_supervisor_uses_retryable_route_only_tool_strategy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_create_agent(**kwargs: Any) -> object:
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(agent_factory, "ChatOpenAI", lambda **_: object())
-    monkeypatch.setattr(agent_factory, "create_agent", fake_create_agent)
-    monkeypatch.setattr(agent_factory, "build_todo_research_planner", lambda _: object())
-
-    build_root_orchestrator(
         AgentDependencies(
             ToolGateway(AuthorizationPolicy()),
-            settings=Settings(
-                openai_api_key="test-key",
-                agent_synthesis_enabled=False,
-                _env_file=None,
-            ),
+            settings=settings(),
+            model=scripted_model(text_turn("unused")),
         )
     )
 
-    strategy = captured["response_format"]
-    assert isinstance(strategy, ToolStrategy)
-    assert strategy.schema is RouteDecision
-    assert set(strategy.schema_specs[0].json_schema["properties"]) == {"route"}
-    assert isinstance(strategy.handle_errors, str)
+    assert root_tool_names(orchestrator) == {
+        KNOWLEDGE,
+        RESEARCH,
+        ANALYSIS,
+        ENTERPRISE,
+        "write_todos",
+    }
+
+
+def test_production_orchestrator_is_a_compiled_langgraph() -> None:
+    orchestrator = build_root_orchestrator(
+        AgentDependencies(
+            ToolGateway(AuthorizationPolicy()),
+            settings=settings(),
+            model=scripted_model(text_turn("unused")),
+        )
+    )
+
+    assert type(orchestrator.graph).__name__ == "CompiledStateGraph"
+    assert {"model", "tools"} <= set(orchestrator.graph.nodes)
 
 
 @pytest.mark.asyncio
-async def test_out_of_scope_route_uses_no_tools_and_returns_duties() -> None:
-    orchestrator = build_root_orchestrator(
-        AgentDependencies(ToolGateway(AuthorizationPolicy()), router=TestRouter())
-    )
-    transitions = []
+async def test_an_undelegated_turn_returns_the_capabilities_answer() -> None:
+    """Answering with no consultation is treated as out of scope, never as knowledge.
 
-    async def capture(transition: Any) -> None:
-        transitions.append(transition)
+    A claim the root invented has no evidence ledger behind it, so there is nothing
+    downstream that could catch it. Substituting the capabilities response makes the
+    model's own parameters unreachable as an answer source.
+    """
+
+    orchestrator = build_root_orchestrator(
+        AgentDependencies(
+            ToolGateway(AuthorizationPolicy()),
+            settings=settings(),
+            model=scripted_model(text_turn("Sure! Here is a joke about databases.")),
+        )
+    )
+    events: list[Any] = []
 
     request_context = context(Role.VIEWER)
-    result = await orchestrator.run("Tell me a joke about databases.", request_context, capture)
+    result = await orchestrator.run(
+        "Tell me a joke about databases.", request_context, await capture_into(events)
+    )
     validation = OutputValidator().validate(result, request_context.access_scope)
 
     assert result.route is AgentRoute.OUT_OF_SCOPE
     assert result.citations == []
+    assert "joke" not in result.answer
     assert "organizational assistant" in result.answer
     assert "approved read-only duties" in result.answer
     assert validation.valid is True
-    assert [item.event_type for item in transitions] == [
-        "agent_started",
-        "routing_completed",
-    ]
+    assert [item.event_type for item in events] == ["agent_started"]
 
 
-async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
+async def corpus_gateway(project_root: Path) -> tuple[ToolGateway, Any]:
     runtime = await build_retrieval_runtime(
         Settings(retrieval_backend="memory", _env_file=None), project_root
     )
@@ -233,30 +197,90 @@ async def build_orchestrator(project_root: Path) -> tuple[Any, Any]:
     gateway.register(python_analysis_spec(1_000))
     for spec in enterprise_tool_specs(InMemoryEnterpriseClient(), 1, 100_000):
         gateway.register(spec)
-    return build_root_orchestrator(AgentDependencies(gateway, router=TestRouter())), runtime
+    return gateway, runtime
+
+
+def corpus_orchestrator(gateway: ToolGateway, model: Any) -> RootOrchestrator:
+    return build_root_orchestrator(AgentDependencies(gateway, settings=settings(), model=model))
 
 
 @pytest.mark.asyncio
-async def test_root_routes_simple_and_complex_requests_with_structured_outputs() -> None:
-    project_root = Path(__file__).parents[2]
-    orchestrator, runtime = await build_orchestrator(project_root)
+async def test_each_specialist_delegation_reaches_its_tools_over_the_real_corpus() -> None:
+    """Every delegation reaches its specialist and comes back with tool-derived results.
+
+    Each request gets its own scripted model so one delegation's turns cannot be consumed
+    by another, and every specialist still runs its real loop against the real gateway.
+    """
+
+    gateway, runtime = await corpus_gateway(Path(__file__).parents[2])
     analyst = context(Role.ANALYST)
-    transitions = []
-    research_transitions = []
-
-    async def capture(transition: Any) -> None:
-        transitions.append(transition)
-
-    async def capture_research(transition: Any) -> None:
-        research_transitions.append(transition)
+    events: list[Any] = []
 
     try:
-        direct = await orchestrator.run("What is the remote working policy?", analyst, capture)
-        research = await orchestrator.run(
-            "Investigate payment outages across the last year.", analyst, capture_research
-        )
-        analysis = await orchestrator.run("Count payment incidents by root cause.", analyst)
-        enterprise = await orchestrator.run("Who owns the payment service?", analyst)
+        direct = await corpus_orchestrator(
+            gateway,
+            scripted_model(
+                delegate(KNOWLEDGE, "Find the remote working policy."),
+                tool_turn(("knowledge_search", {"query": "remote working policy"})),
+                text_turn("The policy permits remote work for approved roles."),
+                text_turn("Remote work is permitted for approved roles [1]."),
+            ),
+        ).run("What is the remote working policy?", analyst, await capture_into(events))
+
+        research = await corpus_orchestrator(
+            gateway,
+            scripted_model(
+                delegate(RESEARCH, "Investigate payment outages across the last year."),
+                tool_turn(
+                    (
+                        "write_todos",
+                        {"todos": [{"content": "Collect payment outages", "status": "pending"}]},
+                    )
+                ),
+                tool_turn(
+                    ("knowledge_search", {"query": "payment outage", "document_type": "incident"}),
+                    ("knowledge_search", {"query": "payment incident runbook"}),
+                ),
+                text_turn("SUMMARY: Payment outages recurred.\nFINDING: Load caused them || ev\n"),
+                text_turn("Payment outages recurred across services [1]."),
+            ),
+        ).run("Investigate payment outages across the last year.", analyst)
+
+        analysis = await corpus_orchestrator(
+            gateway,
+            scripted_model(
+                delegate(ANALYSIS, "Count payment incidents by root cause."),
+                tool_turn(
+                    ("knowledge_search", {"query": "payment incident", "document_type": "incident"})
+                ),
+                tool_turn(
+                    (
+                        "structured_analysis",
+                        {
+                            "operation": "count_by",
+                            "field": "root_cause",
+                            "records": [
+                                {"root_cause": "connection pool exhaustion"},
+                                {"root_cause": "connection pool exhaustion"},
+                                {"root_cause": "configuration change"},
+                            ],
+                        },
+                    )
+                ),
+                text_turn("Connection pool exhaustion leads at two of three."),
+                text_turn("Connection pool exhaustion is the most common root cause [1]."),
+            ),
+        ).run("Count payment incidents by root cause.", analyst)
+
+        enterprise = await corpus_orchestrator(
+            gateway,
+            scripted_model(
+                delegate(ENTERPRISE, "Who owns the payment service?"),
+                tool_turn(("search_services", {"query": "payment"})),
+                text_turn("The payment service is owned by Payments Reliability."),
+                text_turn("The payment service is owned by Payments Reliability."),
+            ),
+        ).run("Who owns the payment service?", analyst)
     finally:
         await runtime.close()
 
@@ -264,27 +288,40 @@ async def test_root_routes_simple_and_complex_requests_with_structured_outputs()
     assert direct.citations and direct.evidence_ids
     assert research.route is AgentRoute.RESEARCH
     assert research.evidence_ids
-    assert {item.node for item in research_transitions} >= {
-        "planner",
-        "workers",
-        "reducer",
-        "coverage_check",
-    }
     assert analysis.route is AgentRoute.ANALYSIS
-    assert "Processed" in analysis.answer
+    assert analysis.evidence_ids
+    assert analysis.status is ResponseStatus.COMPLETE
     assert enterprise.route is AgentRoute.ENTERPRISE
+    assert enterprise.status is ResponseStatus.COMPLETE
     assert "Payments Reliability" in enterprise.answer
-    assert [transition.event_type for transition in transitions] == [
+    assert [item.event_type for item in events] == [
         "agent_started",
         "routing_completed",
-        "retrieval_started",
-        "retrieval_completed",
+        "subagent_started",
+        "tool_started",
+        "tool_completed",
+        "subagent_completed",
     ]
 
 
 @pytest.mark.asyncio
 async def test_production_graph_streams_native_activity_and_one_result() -> None:
-    orchestrator, runtime = await build_orchestrator(Path(__file__).parents[2])
+    gateway, runtime = await corpus_gateway(Path(__file__).parents[2])
+    orchestrator = corpus_orchestrator(
+        gateway,
+        scripted_model(
+            delegate(RESEARCH, "Investigate recurring payment incidents."),
+            tool_turn(
+                (
+                    "write_todos",
+                    {"todos": [{"content": "Find recurring incidents", "status": "pending"}]},
+                )
+            ),
+            tool_turn(("knowledge_search", {"query": "recurring payment incidents"})),
+            text_turn("SUMMARY: Payment incidents recur under load.\nUNRESOLVED: none"),
+            text_turn("Payment incidents recur under load [1]."),
+        ),
+    )
     try:
         updates = [
             update
@@ -300,18 +337,27 @@ async def test_production_graph_streams_native_activity_and_one_result() -> None
     results = [item for item in updates if isinstance(item, AgentExecutionResult)]
     assert len(results) == 1
     assert results[0].route is AgentRoute.RESEARCH
+    # The plan the UI shows is the agent's own todo list, and retrieval narrates itself.
     assert {item.node for item in transitions} >= {
         "intent_routing",
+        "delegation",
         "planner",
-        "workers",
-        "reducer",
-        "coverage_check",
+        "knowledge_search",
     }
 
 
 @pytest.mark.asyncio
 async def test_native_stream_relays_specialist_tool_activity() -> None:
-    orchestrator, runtime = await build_orchestrator(Path(__file__).parents[2])
+    gateway, runtime = await corpus_gateway(Path(__file__).parents[2])
+    orchestrator = corpus_orchestrator(
+        gateway,
+        scripted_model(
+            delegate(ENTERPRISE, "Who owns the payment service?"),
+            tool_turn(("search_services", {"query": "payment"})),
+            text_turn("The payment service is owned by Payments Reliability."),
+            text_turn("The payment service is owned by Payments Reliability."),
+        ),
+    )
     try:
         updates = [
             update
@@ -327,8 +373,55 @@ async def test_native_stream_relays_specialist_tool_activity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enterprise_route_enforces_rbac_before_handler() -> None:
-    orchestrator, runtime = await build_orchestrator(Path(__file__).parents[2])
+async def test_specialist_prose_never_reaches_the_answer_stream() -> None:
+    """Only the root's own tokens stream; a specialist's working notes stay internal.
+
+    A specialist loop runs inside a delegation tool, so its intermediate prose is on the
+    same message stream as the answer. Streaming it would show the user reasoning that
+    the validated response never contains.
+    """
+
+    gateway, runtime = await corpus_gateway(Path(__file__).parents[2])
+    orchestrator = corpus_orchestrator(
+        gateway,
+        scripted_model(
+            delegate(KNOWLEDGE, "Find the remote working policy."),
+            tool_turn(("knowledge_search", {"query": "remote working policy"})),
+            text_turn("SPECIALIST WORKING NOTES that must not be streamed."),
+            text_turn("Remote work is permitted for approved roles [1]."),
+        ),
+    )
+    try:
+        updates = [
+            update
+            async for update in orchestrator.stream(
+                "What is the remote working policy?", context(Role.ANALYST)
+            )
+        ]
+    finally:
+        await runtime.close()
+
+    tokens = [item for item in updates if isinstance(item, AnswerToken)]
+    results = [item for item in updates if isinstance(item, AgentExecutionResult)]
+    streamed = "".join(item.text for item in tokens)
+    assert "WORKING NOTES" not in streamed
+    assert streamed == "Remote work is permitted for approved roles [1]."
+    # Tokens must reach the caller before the terminal result, not after it.
+    assert updates.index(tokens[-1]) < updates.index(results[0])
+    assert results[0].answer == streamed
+
+
+@pytest.mark.asyncio
+async def test_enterprise_delegation_enforces_rbac_before_handler() -> None:
+    gateway, runtime = await corpus_gateway(Path(__file__).parents[2])
+    orchestrator = corpus_orchestrator(
+        gateway,
+        scripted_model(
+            delegate(ENTERPRISE, "Who owns the payment service?"),
+            tool_turn(("search_services", {"query": "payment"})),
+            text_turn("never reached"),
+        ),
+    )
     try:
         with pytest.raises(AuthorizationError):
             await orchestrator.run("Who owns the payment service?", context(Role.VIEWER))
@@ -349,36 +442,11 @@ async def test_agent_tool_surface_denies_unapproved_tool_before_gateway() -> Non
         )
 
 
-def test_production_orchestrator_is_a_compiled_langgraph() -> None:
-    gateway = ToolGateway(AuthorizationPolicy())
-    orchestrator = build_root_orchestrator(AgentDependencies(gateway, router=TestRouter()))
-
-    assert type(orchestrator.graph).__name__ == "CompiledStateGraph"
-    assert {
-        "route",
-        "direct_knowledge",
-        "research",
-        "analysis",
-        "enterprise",
-        "out_of_scope",
-        "assess",
-    } <= set(orchestrator.graph.nodes)
-
-
-class SingleRouteRouter:
-    def __init__(self, route: AgentRoute) -> None:
-        self._route = route
-
-    async def route(self, question: str, conversation_context: str = "") -> RouteDecision:
-        return RouteDecision(route=self._route)
-
-
 def orchestrator_with_stubs(
-    route: AgentRoute,
     knowledge_handler: Any,
+    model: Any,
     enterprise_handler: Any = None,
-    **dependency_overrides: Any,
-) -> Any:
+) -> RootOrchestrator:
     gateway = ToolGateway(AuthorizationPolicy())
     gateway.register(
         ToolSpec(
@@ -397,9 +465,7 @@ def orchestrator_with_stubs(
                 handler=enterprise_handler,
             )
         )
-    return build_root_orchestrator(
-        AgentDependencies(gateway, router=SingleRouteRouter(route), **dependency_overrides)
-    )
+    return build_root_orchestrator(AgentDependencies(gateway, settings=settings(), model=model))
 
 
 def evidence_payload() -> dict[str, Any]:
@@ -418,168 +484,163 @@ def evidence_payload() -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_empty_enterprise_lookup_hands_off_to_the_knowledge_specialist() -> None:
+async def test_empty_enterprise_lookup_is_followed_by_a_knowledge_consultation() -> None:
+    """The hand-off is now the root's decision, and the turn stays honest about it.
+
+    The system of record had no row, so the root consulted the corpus instead. Recovery
+    is still not a clean success: a specialist was spent and found nothing, which the
+    reported status and warnings have to show.
+    """
+
     async def empty_enterprise(parameters: Any, request_context: Any) -> dict[str, Any]:
-        return {}
+        return {"services": []}
 
     async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
         return {"evidence": [evidence_payload()]}
 
     orchestrator = orchestrator_with_stubs(
-        AgentRoute.ENTERPRISE, knowledge, enterprise_handler=empty_enterprise
+        knowledge,
+        scripted_model(
+            delegate(ENTERPRISE, "Find the owner of the payment service."),
+            tool_turn(("search_services", {"query": "payment service owner"})),
+            text_turn("The service catalog has no matching record."),
+            delegate(KNOWLEDGE, "Which document describes payment service ownership?"),
+            tool_turn(("knowledge_search", {"query": "payment service ownership"})),
+            text_turn("The remote work policy is the only match."),
+            text_turn("Remote work is permitted for approved roles [1]."),
+        ),
+        enterprise_handler=empty_enterprise,
     )
-    transitions: list[Any] = []
-
-    async def capture(transition: Any) -> None:
-        transitions.append(transition)
+    events: list[Any] = []
 
     request_context = context(Role.ANALYST)
-    result = await orchestrator.run("Who owns the payment service?", request_context, capture)
+    result = await orchestrator.run(
+        "Who owns the payment service?", request_context, await capture_into(events)
+    )
 
     assert result.route is AgentRoute.DIRECT_KNOWLEDGE
     assert result.evidence_ids == ["ev_handoff_fixture"]
-    handoffs = [item for item in transitions if item.event_type == "handoff_completed"]
+    handoffs = [item for item in events if item.event_type == "handoff_completed"]
     assert len(handoffs) == 1
     assert handoffs[0].metadata["from_route"] == "enterprise"
     assert handoffs[0].metadata["route"] == "direct_knowledge"
-    assert any("handed off" in warning for warning in result.warnings)
-    # The system of record failed, so the turn is degraded rather than a clean success,
-    # and the substituted answer still has to survive citation validation.
+    assert handoffs[0].metadata["handoff_hop"] == 1
     assert result.status is ResponseStatus.PARTIAL
     assert "[1]" in result.answer
     assert OutputValidator().validate(result, request_context.access_scope).valid is True
 
 
 @pytest.mark.asyncio
-async def test_empty_authorized_lookup_refuses_instead_of_fanning_out() -> None:
-    calls = 0
-
+async def test_empty_authorized_lookup_reports_insufficient_evidence() -> None:
     async def empty_knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
-        nonlocal calls
-        calls += 1
         return {"evidence": []}
 
-    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, empty_knowledge)
-    transitions: list[Any] = []
-
-    async def capture(transition: Any) -> None:
-        transitions.append(transition)
+    orchestrator = orchestrator_with_stubs(
+        empty_knowledge,
+        scripted_model(
+            delegate(KNOWLEDGE, "Find the restricted fraud playbook."),
+            tool_turn(("knowledge_search", {"query": "restricted fraud playbook"})),
+            text_turn("I could not find authorized evidence that answers this question."),
+            text_turn("I could not find authorized evidence that answers this question."),
+        ),
+    )
+    events: list[Any] = []
 
     request_context = context(Role.VIEWER)
     result = await orchestrator.run(
-        "What is the restricted fraud playbook?", request_context, capture
+        "What is the restricted fraud playbook?", request_context, await capture_into(events)
     )
     validation = OutputValidator().validate(result, request_context.access_scope)
 
-    # An empty authorized lookup is a clean refusal, not a reason to spend a research
-    # fan-out that would surface unrelated documents.
-    assert calls == 1
-    assert not any(item.event_type == "handoff_completed" for item in transitions)
     assert result.route is AgentRoute.DIRECT_KNOWLEDGE
     assert result.evidence_ids == []
+    assert result.status is ResponseStatus.INSUFFICIENT_EVIDENCE
     assert validation.result.status is ResponseStatus.INSUFFICIENT_EVIDENCE
 
 
 @pytest.mark.asyncio
-async def test_empty_research_falls_back_to_a_single_broad_lookup_once() -> None:
-    question = "Investigate recurring payment incidents across sources."
-
-    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
-        # Research derives narrower per-task queries and finds nothing; only the broad
-        # fallback lookup, which searches the question verbatim, finds the policy.
-        found = parameters.query == question
-        return {"evidence": [evidence_payload()] if found else []}
-
-    orchestrator = orchestrator_with_stubs(AgentRoute.RESEARCH, knowledge)
-    transitions: list[Any] = []
-
-    async def capture(transition: Any) -> None:
-        transitions.append(transition)
-
-    result = await orchestrator.run(question, context(Role.ANALYST), capture)
-
-    handoffs = [item for item in transitions if item.event_type == "handoff_completed"]
-    assert len(handoffs) == 1
-    assert handoffs[0].metadata["from_route"] == "research"
-    assert handoffs[0].metadata["route"] == "direct_knowledge"
-    assert handoffs[0].metadata["handoff_hop"] == 1
-    assert result.route is AgentRoute.DIRECT_KNOWLEDGE
-    assert result.evidence_ids == ["ev_handoff_fixture"]
-    # Recovered, but the selected specialist still failed, so this is not a clean pass.
-    assert result.status is ResponseStatus.PARTIAL
-
-
-@pytest.mark.asyncio
-async def test_specialist_with_evidence_is_not_handed_off() -> None:
+async def test_a_specialist_that_delivered_leaves_no_handoff_trace() -> None:
     async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
         return {"evidence": [evidence_payload()]}
 
-    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, knowledge)
-    transitions: list[Any] = []
+    orchestrator = orchestrator_with_stubs(
+        knowledge,
+        scripted_model(
+            delegate(KNOWLEDGE, "What does the policy allow?"),
+            tool_turn(("knowledge_search", {"query": "policy allowances"})),
+            text_turn("Remote work is permitted for approved roles."),
+            text_turn("Remote work is permitted for approved roles [1]."),
+        ),
+    )
+    events: list[Any] = []
 
-    async def capture(transition: Any) -> None:
-        transitions.append(transition)
-
-    result = await orchestrator.run("What does the policy allow?", context(Role.VIEWER), capture)
+    result = await orchestrator.run(
+        "What does the policy allow?", context(Role.VIEWER), await capture_into(events)
+    )
 
     assert result.route is AgentRoute.DIRECT_KNOWLEDGE
-    assert not any(item.event_type == "handoff_completed" for item in transitions)
-    assert not any("handed off" in warning for warning in result.warnings)
+    assert result.status is ResponseStatus.COMPLETE
+    assert not any(item.event_type == "handoff_completed" for item in events)
 
 
 @pytest.mark.asyncio
-async def test_response_agent_streams_answer_tokens_before_the_final_result() -> None:
-    class FakeStreamingSynthesizer:
-        def __init__(self) -> None:
-            self.prompts: list[str] = []
+async def test_a_specialist_cannot_be_consulted_twice_in_one_turn() -> None:
+    """Re-asking a specialist that already answered is a budget fact, not a request.
 
-        async def astream(self, prompt: str) -> AsyncIterator[str]:
-            self.prompts.append(prompt)
-            for piece in ("Remote work ", "is permitted ", "for approved roles [1]."):
-                yield piece
+    The prompt tells the root not to loop on one specialist; the middleware makes the
+    second attempt impossible, so a confused loop costs one blocked call rather than the
+    whole budget.
+    """
+
+    calls = 0
+
+    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"evidence": []}
+
+    orchestrator = orchestrator_with_stubs(
+        knowledge,
+        scripted_model(
+            delegate(KNOWLEDGE, "First attempt."),
+            tool_turn(("knowledge_search", {"query": "first attempt"})),
+            text_turn("Nothing found."),
+            delegate(KNOWLEDGE, "Try that again."),
+            text_turn("I could not find authorized evidence that answers this question."),
+        ),
+    )
+
+    result = await orchestrator.run("What is the fraud playbook?", context(Role.VIEWER))
+
+    assert calls == 1
+    assert result.status is ResponseStatus.INSUFFICIENT_EVIDENCE
+
+
+@pytest.mark.asyncio
+async def test_citation_markers_are_assigned_by_the_ledger_not_the_specialist() -> None:
+    """Markers count positions in the evidence ledger, across every consultation.
+
+    The root writes the markers, so they have to mean the same thing as the citations the
+    API returns. Numbering from the ledger is what keeps a second consultation's evidence
+    from renumbering the first one's.
+    """
 
     async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
         return {"evidence": [evidence_payload()]}
 
-    synthesizer = FakeStreamingSynthesizer()
-    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, knowledge)
-    orchestrator._synthesizer = synthesizer
-    orchestrator.graph = orchestrator._compile()
+    orchestrator = orchestrator_with_stubs(
+        knowledge,
+        scripted_model(
+            delegate(KNOWLEDGE, "What does the policy allow?"),
+            tool_turn(("knowledge_search", {"query": "policy allowances"})),
+            text_turn("Remote work is permitted."),
+            text_turn("Remote work is permitted for approved roles [1]."),
+        ),
+    )
 
-    updates = [
-        update
-        async for update in orchestrator.stream("What does the policy allow?", context(Role.VIEWER))
-    ]
+    request_context = context(Role.VIEWER)
+    result = await orchestrator.run("What does the policy allow?", request_context)
 
-    tokens = [item for item in updates if isinstance(item, AnswerToken)]
-    results = [item for item in updates if isinstance(item, AgentExecutionResult)]
-    assert [item.text for item in tokens] == [
-        "Remote work ",
-        "is permitted ",
-        "for approved roles [1].",
-    ]
-    # Tokens must reach the caller before the terminal result, not after it.
-    assert updates.index(tokens[-1]) < updates.index(results[0])
-    assert results[0].answer == "Remote work is permitted for approved roles [1]."
-    assert "Remote Work Policy" in synthesizer.prompts[0]
-
-
-@pytest.mark.asyncio
-async def test_synthesis_failure_keeps_the_deterministic_specialist_answer() -> None:
-    class FailingSynthesizer:
-        async def astream(self, prompt: str) -> AsyncIterator[str]:
-            raise RuntimeError("model unavailable")
-            yield ""  # pragma: no cover - unreachable, keeps this an async generator
-
-    async def knowledge(parameters: Any, request_context: Any) -> dict[str, Any]:
-        return {"evidence": [evidence_payload()]}
-
-    orchestrator = orchestrator_with_stubs(AgentRoute.DIRECT_KNOWLEDGE, knowledge)
-    orchestrator._synthesizer = FailingSynthesizer()
-    orchestrator.graph = orchestrator._compile()
-
-    result = await orchestrator.run("What does the policy allow?", context(Role.VIEWER))
-
-    assert "Remote Work Policy" in result.answer
-    assert result.status is ResponseStatus.PARTIAL
-    assert any("synthesis was unavailable" in warning for warning in result.warnings)
+    assert [item.citation_id for item in result.citations] == ["1"]
+    assert result.citations[0].evidence_id == "ev_handoff_fixture"
+    assert OutputValidator().validate(result, request_context.access_scope).valid is True

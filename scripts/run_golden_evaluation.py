@@ -238,6 +238,13 @@ class ApiScenarioExecutor:
 
 
 async def run(output: Path) -> None:
+    # Every specialist is a model-driven loop, so this report measures real agent
+    # behaviour and cannot be produced from a credential-free deterministic profile.
+    if not Settings().openai_api_key:
+        raise SystemExit(
+            "OPENAI_API_KEY is required: the golden evaluation exercises the live agent "
+            "loops end to end, so there is no offline profile to score."
+        )
     executor = ApiScenarioExecutor()
     try:
         report = await GoldenEvaluationRunner(
