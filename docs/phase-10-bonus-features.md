@@ -2,12 +2,17 @@
 
 ## Multi-agent collaboration and failure containment
 
-The research supervisor owns the canonical state. Workers receive isolated task snapshots and
-return typed `ResearchTaskResult` values; they do not mutate shared state. The reducer is the only
-node that merges evidence, findings, warnings, and tool-call counts. One failed worker becomes a
-contained result while successful siblings continue. If every worker in a round fails, the graph
-opens a failure circuit and finalizes a partial response instead of recursively creating more work
-against a likely shared dependency failure.
+Containment lives at the tool boundary rather than in a reducer node. A failing retrieval is caught
+in the gateway tool wrapper, recorded as a degraded invocation with a warning, and returned to the
+model as an ordinary result, so its parallel siblings still contribute their evidence and the run
+continues. Only an authorization denial propagates, because a denial is a policy verdict rather than
+a fault to work around.
+
+Nothing a specialist writes mutates shared state. The per-request `SpecialistCollector` is the only
+thing that merges evidence, warnings, and executed calls, and the orchestrator builds the typed
+result from that record. When every retrieval in a run fails — the likely shared-dependency case —
+the middleware budget and the overall deadline stop the loop and the turn finishes as an honest
+partial answer with warnings instead of recursively generating more work against a broken backend.
 
 ## Human approval
 
@@ -31,5 +36,5 @@ first-stage baseline and rejects regressions.
 `PUT /v1/memory/preferences/{key}` stores only an explicitly consented preference (`explicit: true`).
 `GET` lists the current user's preferences and `DELETE` forgets one. Preferences are keyed by user,
 are never shared between owners, and live in a separate in-memory map or PostgreSQL table from
-conversation messages and LangGraph checkpoints. The root supervisor receives them as a distinct
-context block on every turn.
+conversation messages and LangGraph checkpoints. The root agent receives them as a distinct context
+block on every turn.

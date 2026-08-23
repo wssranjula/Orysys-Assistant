@@ -16,8 +16,8 @@ This folder is the authoritative reference for the Commercial Bank AI Assistant 
 
 | Document | Purpose |
 |---|---|
-| [agents.md](agents.md) | Root LangGraph, supervisor routing, and specialist delegation |
-| [research-graph.md](research-graph.md) | Bounded recursive research workflow |
+| [agents.md](agents.md) | Root delegation agent, specialist loops, and derived provenance |
+| [research-agent.md](research-agent.md) | Bounded recursive research specialist |
 | [retrieval.md](retrieval.md) | Corpus, ingestion, hybrid dense + BM25 retrieval, reranking |
 | [memory-and-tools.md](memory-and-tools.md) | Conversation memory, preferences, analysis, and MCP tools |
 | [security.md](security.md) | Identity, authorization, tool gateway, and rate limiting |
@@ -44,7 +44,9 @@ This folder is the authoritative reference for the Commercial Bank AI Assistant 
 | [005](adr/005-model-selection.md) | Model selection |
 | [006](adr/006-expand-phase-3-corpus-types.md) | Six document types in the corpus |
 | [007](adr/007-single-production-langgraph.md) | Single production LangGraph |
-| [008](adr/008-llm-supervisor-routing.md) | LLM supervisor routing |
+| [008](adr/008-llm-supervisor-routing.md) | LLM supervisor routing (superseded by 010) |
+| [009](adr/009-autonomous-specialists-on-the-harness.md) | Autonomous specialists on the agent harness |
+| [010](adr/010-delegation-tool-root-agent.md) | A root agent whose only tools are its specialists |
 
 ## Historical note
 

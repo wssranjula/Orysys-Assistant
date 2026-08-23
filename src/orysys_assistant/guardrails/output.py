@@ -7,11 +7,18 @@ from langsmith import traceable
 
 from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute
 from orysys_assistant.domain.models import Citation, ResponseStatus
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.security.models import AccessScope
 
 _CITATION_MARKER = re.compile(r"\[([^\[\]\s]{1,20})\]")
 _HIDDEN_REASONING = re.compile(
     r"<\/?(?:thinking|analysis)>|\b(?:hidden )?chain[- ]of[- ]thought\b|\bsystem prompt\b",
+    re.I,
+)
+_BRAND_POLICY = re.compile(
+    r"\bas an ai language model\b|"
+    r"\bi(?:'m| am) just an ai\b|"
+    r"\bi(?:'m| am) not (?:a )?commercial bank\b",
     re.I,
 )
 _GROUNDING_ROUTES = frozenset(
@@ -34,9 +41,10 @@ class OutputValidator:
     """Validate current-request evidence and permit one marker-only repair attempt."""
 
     @traceable(
-        name="deterministic-output-validation",
+        name="output-validation",
         run_type="chain",
         metadata={"control": "citation_and_brand_validation", "phase": 7},
+        tags=app_span_tags("validation"),
     )
     def validate(
         self, result: AgentExecutionResult, access_scope: AccessScope
@@ -62,6 +70,8 @@ class OutputValidator:
             return "The response answer was empty."
         if _HIDDEN_REASONING.search(result.answer):
             return "The response contained protected instruction or reasoning text."
+        if _BRAND_POLICY.search(result.answer):
+            return "The response did not follow Commercial Bank assistant brand policy."
         if result.route not in _GROUNDING_ROUTES:
             return None
         if not result.evidence:
@@ -103,10 +113,20 @@ class OutputValidator:
 
     @staticmethod
     def _repair_once(result: AgentExecutionResult, reason: str) -> AgentExecutionResult | None:
+        """Append the sources the answer drew on but did not mark.
+
+        A specialist writes its own prose and rarely marks every record it was shown, so
+        a partial marker set is a formatting gap rather than a grounding failure. Listing
+        the unmarked sources keeps the ledger complete without editing the claim itself;
+        a marker pointing at evidence that is not in the ledger is still a hard failure.
+        """
+
         if not result.citations:
             return None
-        if not _CITATION_MARKER.search(result.answer):
-            markers = " ".join(f"[{citation.citation_id}]" for citation in result.citations)
+        marked = set(_CITATION_MARKER.findall(result.answer))
+        unmarked = [item for item in result.citations if item.citation_id not in marked]
+        if unmarked:
+            markers = " ".join(f"[{citation.citation_id}]" for citation in unmarked)
             return result.model_copy(update={"answer": f"{result.answer}\n\nSources: {markers}"})
         if "citation" in reason.lower() or "evidence" in reason.lower():
             # A model-backed deployment can replace this no-op candidate with one constrained

@@ -13,6 +13,7 @@ from orysys_assistant.domain.errors import (
     InvalidRequestError,
     ToolTimeoutError,
 )
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.observability.logging import get_logger
 from orysys_assistant.security.authorization import AuthorizationPolicy, Capability
 from orysys_assistant.security.models import TrustedRequestContext
@@ -41,6 +42,9 @@ class ToolSpec:
     timeout_seconds: float = 10
     max_result_bytes: int = 100_000
     retry_attempts: int = 0
+    description: str = ""
+    """Model-facing purpose. The registration owns it so the schema a specialist sees
+    and the schema the gateway validates can never drift apart."""
 
 
 class ToolGateway:
@@ -56,6 +60,17 @@ class ToolGateway:
         if spec.name in self._tools:
             raise ValueError(f"Tool is already registered: {spec.name}")
         self._tools[spec.name] = spec
+
+    def spec(self, tool_name: str) -> ToolSpec:
+        """Expose a registration so agents can publish its schema to a model.
+
+        Read-only by construction: ``ToolSpec`` is frozen, and holding one grants no
+        ability to execute. Every call still goes through :meth:`execute`.
+        """
+        spec = self._tools.get(tool_name)
+        if spec is None:
+            raise InvalidRequestError("The requested tool is not registered.")
+        return spec
 
     @staticmethod
     def _forbidden_keys(value: Any) -> set[str]:
@@ -116,9 +131,24 @@ class ToolGateway:
                 "tool_name": tool_name,
                 "role": context.identity.role.value,
                 "agent_name": "tool_gateway",
-            }
+            },
+            tags=app_span_tags(tool_name, context.identity.role.value),
         ):
-            result = await self._invoke(spec, validated, context)
+            result = await ToolGateway._invoke(
+                spec,
+                validated,
+                context,
+                langsmith_extra={
+                    "name": tool_name,
+                    "metadata": {
+                        "tool_name": tool_name,
+                        "role": context.identity.role.value,
+                        "agent_name": "tool_gateway",
+                        "control": "authorized_tool_gateway",
+                    },
+                    "tags": app_span_tags(tool_name, context.identity.role.value),
+                },
+            )
 
         result_size = len(json.dumps(result, default=str).encode("utf-8"))
         if result_size > spec.max_result_bytes:
@@ -135,7 +165,6 @@ class ToolGateway:
 
     @staticmethod
     @traceable(
-        name="tool-gateway-execution",
         run_type="tool",
         metadata={"control": "authorized_tool_gateway"},
     )

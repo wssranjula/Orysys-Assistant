@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from orysys_assistant.config import Settings
 from orysys_assistant.domain.errors import InvalidRequestError
 from orysys_assistant.memory.runtime import MemoryRuntime
-from orysys_assistant.retrieval.chunking import SectionAwareChunker
+from orysys_assistant.retrieval.chunking import build_chunker
 from orysys_assistant.retrieval.embeddings import (
     DeterministicHashEmbedding,
     OpenAIEmbeddingProvider,
@@ -28,7 +28,6 @@ from orysys_assistant.tools.gateway import ToolGateway
 
 if TYPE_CHECKING:
     from orysys_assistant.agent.orchestrator import RootOrchestrator
-    from orysys_assistant.agent.router import AgentRouter
     from orysys_assistant.tools.mcp_client import EnterpriseClient
 
 
@@ -66,7 +65,13 @@ async def _build_memory_runtime(settings: Settings, root: Path) -> RetrievalRunt
         manifest_path=manifest_path,
         namespace=settings.pinecone_namespace,
         parser=MarkdownDocumentParser(corpus),
-        chunker=SectionAwareChunker(settings.organization_id),
+        chunker=build_chunker(
+            settings.organization_id,
+            target_tokens=settings.chunk_target_tokens,
+            max_tokens=settings.chunk_max_tokens,
+            overlap_tokens=settings.chunk_overlap_tokens,
+            merge_sections=settings.chunk_merge_sections,
+        ),
         embeddings=embeddings,
         vector_store=vector_store,
     ).run()
@@ -151,14 +156,14 @@ class AgentRuntimeManager:
         memory_runtime: MemoryRuntime,
         project_root: Path | None = None,
         enterprise_client: "EnterpriseClient | None" = None,
-        agent_router: "AgentRouter | None" = None,
+        agent_model: object | None = None,
     ) -> None:
         self._settings = settings
         self._gateway = gateway
         self._memory_runtime = memory_runtime
         self._project_root = project_root
         self._enterprise_client = enterprise_client
-        self._agent_router = agent_router
+        self._agent_model = agent_model
         self._lock = asyncio.Lock()
         self._runtime: RetrievalRuntime | None = None
         self._orchestrator: RootOrchestrator | None = None
@@ -211,7 +216,7 @@ class AgentRuntimeManager:
                             self._gateway,
                             self._settings,
                             self._memory_runtime.checkpointer,
-                            self._agent_router,
+                            self._agent_model,
                         )
                     )
         return self._orchestrator

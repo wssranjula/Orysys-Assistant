@@ -7,7 +7,7 @@ panel visible. If LangSmith is configured, open the matching project in a separa
 
 Explain that the system answers internal knowledge questions while enforcing identity, document
 scope, tool permissions, evidence grounding, and failure containment. Show `docs/architecture.md`.
-Call out one root harness, three specialists, the explicit recursive research graph, and security
+Call out one root harness, four autonomous specialists, the Deep Agents research loop, and security
 services outside agent prompts.
 
 ## 2. Simple grounded retrieval
@@ -25,8 +25,8 @@ Sign in as Analyst and ask:
 
 > Summarize payment-failure outages from the last year and identify recurring root causes.
 
-Show planner tasks, parallel workers, reducer, coverage check, bounded follow-up behavior, evidence
-deduplication, partial-state handling, and the research trace tree.
+Show the live todo list the agent wrote, the parallel retrievals it chose, its re-planning after a
+thin result, evidence deduplication, partial-state handling, and the research trace tree.
 
 ## 4. Conversation memory
 
@@ -67,8 +67,9 @@ retrieval outage, worker isolation, rate-limit, and citation-failure cases. Open
 
 ## 8. Observability and code quality
 
-Correlate the UI trace ID with structured API logs and LangSmith. Show root routing, subagent/graph
-nodes, authorization, tool, retrieval, and validator runs in one trace tree. Then run:
+Correlate the UI trace ID with structured API logs and LangSmith. Show the root's delegation calls,
+the specialist loop inside each one, authorization, tool, retrieval, and validator runs in one trace
+tree. Then run:
 
 ```powershell
 uv run ruff check .
@@ -81,7 +82,6 @@ uv run python scripts/check_public_readiness.py
 
 Show the four demo credentials (including the separate approver account), then the five healthy
 Compose services, non-root/read-only container settings, `.env.example`, CI,
-ADRs, and `docs/assumptions-and-tradeoffs.md`. Close with provider-backed synthesis, enterprise SSO,
-managed infrastructure, ingestion orchestration, replacement of the synthetic approval write with
-an idempotent enterprise integration, and feedback-led
-continuous evaluation.
+ADRs, and `docs/assumptions-and-tradeoffs.md`. Close with enterprise SSO, managed infrastructure,
+ingestion orchestration, replacement of the synthetic approval write with an idempotent enterprise
+integration, and feedback-led continuous evaluation.

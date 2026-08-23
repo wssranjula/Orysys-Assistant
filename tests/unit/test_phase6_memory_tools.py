@@ -4,6 +4,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from conftest import scripted_model, text_turn, tool_turn
 from pydantic import BaseModel
 
 from orysys_assistant.agent.subagents import EnterpriseToolSubagent
@@ -39,7 +40,7 @@ def context(role: Role) -> TrustedRequestContext:
 
 @pytest.mark.asyncio
 async def test_memory_is_owner_isolated_and_stores_only_compact_turn_data() -> None:
-    repository = InMemoryConversationRepository(max_messages=4, max_summary_characters=120)
+    repository = InMemoryConversationRepository(max_messages=20, max_summary_characters=80)
     conversation_id = uuid4()
     await repository.get_or_create(conversation_id, "owner-1")
     record = await repository.append_turn(
@@ -52,7 +53,21 @@ async def test_memory_is_owner_isolated_and_stores_only_compact_turn_data() -> N
 
     assert [message.role for message in record.messages] == ["user", "assistant"]
     assert record.evidence_ids == ["ev_1", "ev_2"]
-    assert len(record.summary) <= 120
+    assert len(record.summary) <= 80
+    assert "earlier turn(s) omitted" not in record.summary
+
+    for index in range(8):
+        record = await repository.append_turn(
+            conversation_id,
+            "owner-1",
+            f"Question {index}",
+            f"Answer {index}",
+            [],
+        )
+
+    assert "earlier turn(s) omitted" in record.summary
+    assert record.summary.endswith("Answer 7")
+    assert "Question 0" not in record.summary
     assert "token" not in record.model_dump_json().lower()
     with pytest.raises(AuthorizationError):
         await repository.get(conversation_id, "owner-2")
@@ -137,7 +152,13 @@ async def test_mcp_timeout_returns_degraded_result_and_activity() -> None:
             timeout_seconds=0.01,
         )
     )
-    subagent = EnterpriseToolSubagent(ScopedToolbox(gateway, frozenset({"search_services"})))
+    subagent = EnterpriseToolSubagent(
+        ScopedToolbox(gateway, frozenset({"search_services"})),
+        scripted_model(
+            tool_turn(("search_services", {"query": "payment"})),
+            text_turn("The service catalog could not be reached."),
+        ),
+    )
     transitions = []
 
     async def capture(transition: Any) -> None:
@@ -145,6 +166,9 @@ async def test_mcp_timeout_returns_degraded_result_and_activity() -> None:
 
     execution = await subagent.run("Who owns the payment service?", context(Role.ANALYST), capture)
 
-    assert execution.result.data == {}
-    assert any("ToolTimeoutError" in warning for warning in execution.result.warnings)
+    # The timeout is reported to the model as an ordinary degraded result, so the loop
+    # finishes and says the system was unreachable instead of raising through the API.
+    assert execution.grounded is False
+    assert any("ToolTimeoutError" in warning for warning in execution.warnings)
     assert [item.status for item in transitions] == ["started", "degraded"]
+    assert "could not be reached" in execution.report

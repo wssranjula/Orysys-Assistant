@@ -1,78 +1,232 @@
-"""Controlled root orchestration used by the API and deterministic tests."""
+"""Autonomous root agent whose entire tool surface is specialist delegation.
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Hashable
+The root is a tool-calling loop. It decides which specialist to consult, how to phrase
+the objective, whether one consultation was enough, and how to write the final answer.
+That replaces the classifier, the four specialist nodes, the hand-off feedback edge,
+and the separate synthesis pass with one loop the model drives.
+
+What the model does not decide is the boundary. It cannot reach a document, a record,
+or a system directly: every capability sits behind a specialist that owns a
+gateway-scoped toolbox. Delegation depth is a middleware budget rather than prompt
+guidance. Most importantly, the route, status, evidence, and citations this module
+returns are rebuilt from the delegations that actually ran, so the answer's provenance
+describes observed work rather than anything the model claimed about its own work.
+"""
+
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
-from typing import Annotated, Any, TypedDict
+from dataclasses import dataclass, field
+from time import monotonic
+from typing import Any
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain.agents import create_agent
+from langchain_core.messages import RemoveMessage
+from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.runtime import Runtime
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.runtime import get_runtime
 from langsmith import traceable
+from pydantic import BaseModel, Field
 
+from orysys_assistant.agent.gateway_tools import (
+    SpecialistOutcome,
+    TransitionSink,
+    final_text,
+)
+from orysys_assistant.agent.middleware_limits import (
+    DelegationOnceMiddleware,
+    QuietTodoListMiddleware,
+    budget_middleware,
+    repair_orphaned_tool_calls,
+)
 from orysys_assistant.agent.models import (
     AgentExecutionResult,
     AgentRoute,
     AgentTransition,
-    AnalysisExecution,
     AnswerToken,
-    EnterpriseExecution,
-    ResearchExecution,
 )
-from orysys_assistant.agent.router import AgentRouter
+from orysys_assistant.agent.research_agent import ResearchSubagent, plan_activity_middleware
 from orysys_assistant.agent.subagents import (
     AnalysisSubagent,
     EnterpriseToolSubagent,
-    ResearchSubagent,
-    _first_sentence,
+    KnowledgeSubagent,
+    evidence_summary,
 )
-from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.domain.models import Citation, ResponseStatus
-from orysys_assistant.guardrails.content import unwrap_evidence
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.retrieval.models import Evidence
 from orysys_assistant.security.models import TrustedRequestContext
-from orysys_assistant.tools.knowledge_search import KNOWLEDGE_QUERY_MAX_LENGTH
 
-TransitionSink = Callable[[AgentTransition], Awaitable[None]]
+ROOT_QUESTION_MAX_CHARACTERS = 12_000
+"""Bound on the question plus conversation context handed to the root loop."""
 
-MAX_ROUTE_HANDOFFS = 1
-"""How many times one request may be handed to a second specialist."""
+CAPABILITIES_ANSWER = (
+    "I’m the Commercial Bank organizational assistant. I can help you:\n"
+    "- find authorized information in internal policies, runbooks, incidents, "
+    "architecture, product specifications, and meeting notes;\n"
+    "- investigate and compare evidence across multiple internal sources;\n"
+    "- calculate approved counts, percentages, distributions, and trends; and\n"
+    "- look up approved employee, service-catalog, ownership, on-call, and "
+    "incident records.\n\n"
+    "I can’t help with unrelated general questions, entertainment, personal "
+    "advice, or actions outside these approved read-only duties."
+)
+"""The answer returned whenever the root resolves a turn without consulting anyone.
 
-HANDOFF_ROUTES: dict[AgentRoute, AgentRoute] = {
-    # A decomposed investigation found nothing; try one broad unfiltered lookup.
-    AgentRoute.RESEARCH: AgentRoute.DIRECT_KNOWLEDGE,
-    # There is nothing to aggregate, so fall back to answering from documents.
-    AgentRoute.ANALYSIS: AgentRoute.DIRECT_KNOWLEDGE,
-    # The system of record has no matching row; the documents may still describe it.
-    AgentRoute.ENTERPRISE: AgentRoute.DIRECT_KNOWLEDGE,
-    # Deliberately no direct_knowledge escalation. An empty authorized lookup usually
-    # means the corpus holds nothing this user may read, and fanning out to research
-    # only surfaces unrelated documents that dress a clean refusal up as a partial
-    # answer. Every hand-off here narrows toward a cheaper, broader single lookup.
-}
+Answering from the model's own parameters is the one failure this system cannot detect
+downstream: there is no evidence ledger to check the claim against. So an undelegated
+turn is treated as out of scope by construction rather than trusted as a shortcut.
+"""
+
+ROOT_SYSTEM_PROMPT = """You are the root agent for Commercial Bank's internal organizational
+assistant. You never answer from your own knowledge of banking, policy, or the organization.
+Everything you assert must come from a specialist you consulted on this turn.
+
+You have four specialists. Choose by what the question needs:
+- consult_knowledge_specialist: a focused policy or factual lookup one document can settle.
+- consult_research_specialist: investigation, comparison, recurring patterns, contradictions,
+  or synthesis that needs several documents. Use this when the question spans document
+  families such as incidents, meeting notes, runbooks, architecture, policies, or
+  specifications, even if it also mentions incident records.
+- consult_analysis_specialist: counts, percentages, rankings, distributions, or trends.
+- consult_enterprise_specialist: a system-of-record lookup in the employee directory, the
+  service catalog, or the incident system.
+
+Each specialist is stateless and cannot see the user or this conversation, so put the full
+objective in the request, including any context from earlier turns that it needs.
+
+If a specialist reports that it found nothing, consider whether a different one would have the
+answer — a missing catalog record may still be described in the documents — and consult it.
+Do not re-consult a specialist that already came back empty for the same objective. Consult
+several specialists in one turn when the question genuinely has independent parts.
+
+If the request is a greeting, a question about what you can do, or anything outside these
+approved read-only duties, do not consult anyone; say so directly.
+
+Write the final answer yourself from what the specialists reported. Cite with the exact
+bracketed markers listed under "Authorized evidence" in their replies, placing each marker on
+the statement it supports. Never invent a marker, and never cite evidence you were not shown.
+Say plainly which parts of the question the evidence did not settle. Do not narrate your
+process or announce which specialist you are about to consult; just consult it and then answer.
+"""
 
 
-class RootAgentState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    question: str
-    route: AgentRoute | None
-    result: AgentExecutionResult | None
-    attempted_routes: list[str]
-    retry_route: AgentRoute | None
-    handoff_notes: list[str]
-    handoffs: int
+class DelegationRequest(BaseModel):
+    """The objective handed to a specialist, authored by the root model."""
+
+    request: str = Field(
+        description=(
+            "The complete objective for the specialist, written as a standalone "
+            "instruction. It cannot see the user or the conversation, so include every "
+            "detail it needs, and state what it should report back."
+        ),
+        min_length=1,
+        max_length=4_000,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationRecord:
+    """One consultation, as observed rather than as described."""
+
+    route: AgentRoute
+    grounded: bool
+    evidence_added: int
+
+
+@dataclass(slots=True)
+class DelegationLedger:
+    """Everything the specialists actually produced during one request.
+
+    Citation markers are positions in this ledger, so the numbering a specialist is told
+    to use is the numbering the returned citations carry. Evidence is keyed by identifier
+    and appended once, which keeps markers stable when two specialists surface the same
+    record.
+    """
+
+    evidence: dict[str, Evidence] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    records: list[DelegationRecord] = field(default_factory=list)
+
+    def record(self, route: AgentRoute, outcome: SpecialistOutcome) -> None:
+        added = 0
+        for item in outcome.evidence:
+            if item.evidence_id not in self.evidence:
+                self.evidence[item.evidence_id] = item
+                added += 1
+        for warning in outcome.warnings:
+            if warning not in self.warnings:
+                self.warnings.append(warning)
+        self.records.append(DelegationRecord(route, outcome.grounded, added))
+
+    def ordered_evidence(self) -> list[Evidence]:
+        return list(self.evidence.values())
+
+    def citations(self) -> list[Citation]:
+        return [
+            Citation(
+                citation_id=str(index),
+                evidence_id=item.evidence_id,
+                document_id=item.document_id,
+                title=item.title,
+                chunk_id=item.chunk_id,
+                source_path=str(item.metadata["source_path"]),
+            )
+            for index, item in enumerate(self.ordered_evidence(), start=1)
+        ]
+
+    def route(self) -> AgentRoute:
+        """Report the specialist that carried the turn, preferring one that delivered.
+
+        A consultation that produced evidence is what the answer actually rests on, so
+        it names the route even when the model tried something else first. This keeps
+        the reported route tied to observed work: a turn with document evidence can
+        never report a route that would let it skip grounding validation.
+        """
+
+        if not self.records:
+            return AgentRoute.OUT_OF_SCOPE
+        for item in self.records:
+            if item.evidence_added:
+                return item.route
+        return self.records[-1].route
+
+    def status(self) -> ResponseStatus:
+        if not self.records:
+            return ResponseStatus.COMPLETE
+        if not any(item.grounded for item in self.records):
+            return ResponseStatus.INSUFFICIENT_EVIDENCE
+        if self.warnings or not all(item.grounded for item in self.records):
+            return ResponseStatus.PARTIAL
+        return ResponseStatus.COMPLETE
 
 
 @dataclass(frozen=True, slots=True)
 class RootAgentContext:
+    """Per-request runtime context for the root loop, never visible to the model."""
+
     request_context: TrustedRequestContext
+    ledger: DelegationLedger
     transition_sink: TransitionSink | None = None
-    conversation_summary: str = ""
     thread_id: str | None = None
-    long_term_memory: str = ""
+
+
+SpecialistRunner = Callable[
+    [str, TrustedRequestContext, TransitionSink, str | None], Awaitable[SpecialistOutcome]
+]
+
+
+@dataclass(frozen=True, slots=True)
+class SpecialistBinding:
+    """How one specialist is published to the root model as a single tool."""
+
+    route: AgentRoute
+    tool_name: str
+    agent_name: str
+    description: str
+    plan_summary: str
+    run: SpecialistRunner
 
 
 class RootOrchestrator:
@@ -81,62 +235,40 @@ class RootOrchestrator:
     def __init__(
         self,
         *,
-        router: AgentRouter,
-        direct_toolbox: ScopedToolbox,
+        model: Any,
+        knowledge: KnowledgeSubagent,
         research: ResearchSubagent,
         analysis: AnalysisSubagent,
         enterprise: EnterpriseToolSubagent,
         checkpointer: Any = None,
-        synthesizer: Any = None,
+        max_tool_calls: int = 8,
+        max_model_calls: int = 6,
     ) -> None:
-        self._router = router
-        self._direct_toolbox = direct_toolbox
-        self._research = research
-        self._analysis = analysis
-        self._enterprise = enterprise
+        self._bindings = _bindings(knowledge, research, analysis, enterprise)
         self._checkpointer = checkpointer
-        self._synthesizer = synthesizer
-        self.graph = self._compile()
-
-    def _compile(self) -> Any:
-        builder = StateGraph(RootAgentState, context_schema=RootAgentContext)
-        builder.add_node("route", self._route_node)
-        builder.add_node("direct_knowledge", self._direct_node)
-        builder.add_node("research", self._research_node)
-        builder.add_node("analysis", self._analysis_node)
-        builder.add_node("enterprise", self._enterprise_node)
-        builder.add_node("out_of_scope", self._out_of_scope_node)
-        builder.add_node("assess", self._assess_node)
-        builder.add_node("synthesize", self._synthesize_node)
-        specialists: dict[Hashable, str] = {
-            AgentRoute.DIRECT_KNOWLEDGE.value: "direct_knowledge",
-            AgentRoute.RESEARCH.value: "research",
-            AgentRoute.ANALYSIS.value: "analysis",
-            AgentRoute.ENTERPRISE.value: "enterprise",
-        }
-        builder.add_edge(START, "route")
-        builder.add_conditional_edges(
-            "route",
-            self._route_after_classification,
-            {**specialists, AgentRoute.OUT_OF_SCOPE.value: "out_of_scope"},
+        tools = [_delegation_tool(binding) for binding in self._bindings]
+        # Typed as Any because the compiled graph's overloads are keyed on literal state
+        # and stream-mode types that a runtime-built input mapping cannot satisfy.
+        self.graph: Any = create_agent(
+            model=model,
+            tools=tools,
+            system_prompt=ROOT_SYSTEM_PROMPT,
+            context_schema=RootAgentContext,
+            middleware=[
+                QuietTodoListMiddleware(),
+                plan_activity_middleware(self.name, "root_planner"),
+                DelegationOnceMiddleware([tool.name for tool in tools]),
+                *budget_middleware(max_tool_calls=max_tool_calls, max_model_calls=max_model_calls),
+            ],
+            checkpointer=checkpointer,
+            name="root-orchestrator",
         )
-        # Every specialist reports back to one assessment node, which owns the single
-        # bounded hand-off. Out-of-scope has nothing to assess.
-        for node in specialists.values():
-            builder.add_edge(node, "assess")
-        builder.add_edge("out_of_scope", "synthesize")
-        builder.add_conditional_edges(
-            "assess",
-            self._route_after_assessment,
-            {**specialists, "synthesize": "synthesize"},
-        )
-        builder.add_edge("synthesize", END)
-        return builder.compile(checkpointer=self._checkpointer)
 
     @traceable(
         name="root-deep-agent-orchestration",
         run_type="chain",
         metadata={"agent": "root_deep_agent", "phase": 6},
+        tags=app_span_tags("root"),
     )
     async def run(
         self,
@@ -147,21 +279,19 @@ class RootOrchestrator:
         thread_id: str | None = None,
         long_term_memory: str = "",
     ) -> AgentExecutionResult:
-        final = await self.graph.ainvoke(
-            self._initial_state(question),
-            config=self._graph_config(thread_id),
+        ledger = DelegationLedger()
+        await self._started(transition_sink)
+        state = await self.graph.ainvoke(
+            self._input(question, conversation_summary, long_term_memory),
+            config=self._config(thread_id),
             context=RootAgentContext(
                 request_context=context,
+                ledger=ledger,
                 transition_sink=transition_sink,
-                conversation_summary=conversation_summary,
                 thread_id=thread_id,
-                long_term_memory=long_term_memory,
             ),
         )
-        result = final["result"]
-        if result is None:
-            raise RuntimeError("The agent graph completed without a result.")
-        return AgentExecutionResult.model_validate(result)
+        return _result(final_text(state), ledger)
 
     async def stream(
         self,
@@ -170,571 +300,411 @@ class RootOrchestrator:
         conversation_summary: str = "",
         thread_id: str | None = None,
         long_term_memory: str = "",
+        timeout_seconds: float | None = None,
     ) -> AsyncIterator[AgentTransition | AnswerToken | AgentExecutionResult]:
-        """Stream native LangGraph activity and answer tokens, then the typed result."""
+        """Stream activity and the root's own answer tokens, then the typed result."""
 
-        graph_context = RootAgentContext(
-            request_context=context,
-            # The compiled graph owns production conversation history. The explicit
-            # summary remains a compatibility input when no checkpointer is configured.
-            conversation_summary=conversation_summary if self._checkpointer is None else "",
-            thread_id=thread_id,
-            long_term_memory=long_term_memory,
-        )
-        async for part in self.graph.astream(
-            self._initial_state(question),
-            config=self._graph_config(thread_id),
-            context=graph_context,
-            stream_mode=["custom", "updates"],
-            version="v2",
+        ledger = DelegationLedger()
+        yield _started_transition()
+        deadline = monotonic() + timeout_seconds if timeout_seconds is not None else None
+        ordered_message_ids: list[str] = []
+        message_text: dict[str, str] = {}
+        tool_call_message_ids: set[str] = set()
+        delegation_seen = False
+
+        async for mode, part in self.graph.astream(
+            self._input(
+                question,
+                # The compiled graph owns production conversation history. The explicit
+                # summary remains a compatibility input when no checkpointer is set.
+                conversation_summary if self._checkpointer is None else "",
+                long_term_memory,
+            ),
+            config=self._config(thread_id),
+            context=RootAgentContext(
+                request_context=context,
+                ledger=ledger,
+                transition_sink=None,
+                thread_id=thread_id,
+            ),
+            stream_mode=["custom", "messages"],
         ):
-            if part["type"] == "custom":
-                data = part["data"]
-                token = data.get("answer_token") if isinstance(data, dict) else None
-                yield (
-                    AnswerToken(text=token)
-                    if isinstance(token, str) and token
-                    else AgentTransition.model_validate(data)
+            if deadline is not None and monotonic() >= deadline:
+                await self._repair_checkpoint(thread_id)
+                yield _timeout_result(
+                    _final_root_answer(message_text, ordered_message_ids, tool_call_message_ids),
+                    ledger,
                 )
+                return
+            if mode == "custom":
+                yield AgentTransition.model_validate(part)
                 continue
-            for node, update in part["data"].items():
-                if node != "synthesize":
-                    continue
-                result = update.get("result") if isinstance(update, dict) else None
-                if result is not None:
-                    yield AgentExecutionResult.model_validate(result)
+            chunk = _parse_root_model_chunk(part)
+            if chunk is None or not chunk.text:
+                if chunk is not None and chunk.has_tool_calls:
+                    tool_call_message_ids.add(chunk.message_id)
+                    delegation_seen = True
+                continue
+            if chunk.message_id not in message_text:
+                ordered_message_ids.append(chunk.message_id)
+            message_text[chunk.message_id] = message_text.get(chunk.message_id, "") + chunk.text
+            if chunk.has_tool_calls:
+                tool_call_message_ids.add(chunk.message_id)
+                delegation_seen = True
+            if chunk.message_id in tool_call_message_ids:
+                continue
+            if delegation_seen:
+                yield AnswerToken(text=chunk.text)
+        answer = _final_root_answer(message_text, ordered_message_ids, tool_call_message_ids)
+        yield _result(answer, ledger)
+
+    async def _started(self, sink: TransitionSink | None) -> None:
+        await _publish(sink, _started_transition())
+
+    async def _repair_checkpoint(self, thread_id: str | None) -> None:
+        if self._checkpointer is None:
+            return
+        config = self._config(thread_id)
+        if config is None:
+            return
+        state = await self.graph.aget_state(config)
+        if not state.values:
+            return
+        repaired = repair_orphaned_tool_calls(state.values.get("messages", []))
+        if repaired is None:
+            return
+        await self.graph.aupdate_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *repaired]},
+        )
 
     @staticmethod
-    def _initial_state(question: str) -> dict[str, Any]:
+    def _input(question: str, conversation_summary: str, long_term_memory: str) -> dict[str, Any]:
+        context = "\n\n".join(item for item in (conversation_summary, long_term_memory) if item)
         return {
-            "messages": [HumanMessage(content=question)],
-            "question": question,
-            "route": None,
-            "result": None,
-            "attempted_routes": [],
-            "retry_route": None,
-            "handoff_notes": [],
-            "handoffs": 0,
+            "messages": [{"role": "user", "content": _with_conversation_context(question, context)}]
         }
 
-    def _graph_config(self, thread_id: str | None) -> dict[str, Any] | None:
+    def _config(self, thread_id: str | None) -> dict[str, Any] | None:
         if self._checkpointer is None:
             return None
         return {"configurable": {"thread_id": thread_id or str(uuid4())}}
 
-    async def _route_node(
-        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
-    ) -> dict[str, Any]:
-        await self._emit(
-            runtime.context.transition_sink,
-            AgentTransition(
-                event_type="agent_started",
-                agent=self.name,
-                node="intent_routing",
-                status="started",
-                message="Supervisor agent is classifying the request.",
-            ),
-        )
-        summary = runtime.context.conversation_summary or self._message_history(state["messages"])
-        full_context = "\n\n".join(
-            item for item in (summary, runtime.context.long_term_memory) if item
-        )
-        decision = await self._router.route(state["question"], full_context)
-        route = decision.route
-        await self._emit(
-            runtime.context.transition_sink,
-            AgentTransition(
-                event_type="routing_completed",
-                agent=self.name,
-                node="intent_routing",
-                status="completed",
-                message=f"Selected {route.value} route.",
-                metadata={
-                    "route": route.value,
-                    "plan_summary": self._plan_summary(route),
-                },
-            ),
-        )
-        return {
-            "route": route,
-            "question": self._with_conversation_context(state["question"], full_context),
-        }
 
-    @staticmethod
-    def _route_after_classification(state: RootAgentState) -> str:
-        route = state["route"]
-        if route is None:
-            raise RuntimeError("The routing node did not select a route.")
-        return route.value
+def _bindings(
+    knowledge: KnowledgeSubagent,
+    research: ResearchSubagent,
+    analysis: AnalysisSubagent,
+    enterprise: EnterpriseToolSubagent,
+) -> list[SpecialistBinding]:
+    async def run_knowledge(
+        request: str, context: TrustedRequestContext, sink: TransitionSink, thread_id: str | None
+    ) -> SpecialistOutcome:
+        return await knowledge.run(request, context, sink)
 
-    async def _direct_node(
-        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
-    ) -> dict[str, AgentExecutionResult]:
-        return {
-            "result": await self._direct(
-                state["question"], runtime.context.request_context, runtime.context.transition_sink
-            )
-        }
+    async def run_research(
+        request: str, context: TrustedRequestContext, sink: TransitionSink, thread_id: str | None
+    ) -> SpecialistOutcome:
+        return await research.run(request, context, sink)
 
-    async def _research_node(
-        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
-    ) -> dict[str, AgentExecutionResult]:
-        relay = self._relay_sink(runtime.context)
-        return {
-            "result": await self._delegate_research(
-                state["question"],
-                runtime.context.request_context,
-                relay,
-                runtime.context.thread_id,
-            )
-        }
+    async def run_analysis(
+        request: str, context: TrustedRequestContext, sink: TransitionSink, thread_id: str | None
+    ) -> SpecialistOutcome:
+        return await analysis.run(request, context, sink)
 
-    @staticmethod
-    def _relay_sink(context: RootAgentContext) -> TransitionSink:
-        writer: Callable[[Any], None] | None = None
-        with suppress(RuntimeError):
-            writer = get_stream_writer()
+    async def run_enterprise(
+        request: str, context: TrustedRequestContext, sink: TransitionSink, thread_id: str | None
+    ) -> SpecialistOutcome:
+        return await enterprise.run(request, context, sink)
 
-        async def relay(transition: AgentTransition) -> None:
-            if writer is not None:
-                writer(transition.model_dump(mode="json"))
-            if context.transition_sink is not None:
-                await context.transition_sink(transition)
-
-        return relay
-
-    async def _analysis_node(
-        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
-    ) -> dict[str, AgentExecutionResult]:
-        return {
-            "result": await self._delegate_analysis(
-                state["question"],
-                runtime.context.request_context,
-                self._relay_sink(runtime.context),
-            )
-        }
-
-    async def _enterprise_node(
-        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
-    ) -> dict[str, AgentExecutionResult]:
-        return {
-            "result": await self._delegate_enterprise(
-                state["question"],
-                runtime.context.request_context,
-                self._relay_sink(runtime.context),
-            )
-        }
-
-    @staticmethod
-    def _out_of_scope_node(state: RootAgentState) -> dict[str, AgentExecutionResult]:
-        return {
-            "result": AgentExecutionResult(
-                route=AgentRoute.OUT_OF_SCOPE,
-                answer=(
-                    "I’m the Commercial Bank organizational assistant. I can help you:\n"
-                    "- find authorized information in internal policies, runbooks, incidents, "
-                    "architecture, product specifications, and meeting notes;\n"
-                    "- investigate and compare evidence across multiple internal sources;\n"
-                    "- calculate approved counts, percentages, distributions, and trends; and\n"
-                    "- look up approved employee, service-catalog, ownership, on-call, and "
-                    "incident records.\n\n"
-                    "I can’t help with unrelated general questions, entertainment, personal "
-                    "advice, or actions outside these approved read-only duties."
-                ),
-            )
-        }
-
-    async def _assess_node(
-        self, state: RootAgentState, runtime: Runtime[RootAgentContext]
-    ) -> dict[str, Any]:
-        """Decide whether the specialist result is usable or needs one hand-off.
-
-        The supervisor classifies intent from wording alone, so it cannot know whether
-        the corpus actually holds the answer.  This node is the feedback edge: when a
-        specialist returns no usable evidence, one different specialist gets a turn
-        before the request is given up on.
-        """
-
-        result = state["result"]
-        if result is None:
-            raise RuntimeError("The specialist node did not produce a result.")
-        attempted = [*state["attempted_routes"], result.route.value]
-        retry = self._handoff_route(result, attempted, state["handoffs"])
-        if retry is None:
-            return {
-                "attempted_routes": attempted,
-                "retry_route": None,
-                "result": self._settled_result(result, state["handoffs"]),
-            }
-
-        note = (
-            f"The {result.route.value.replace('_', ' ')} specialist found no usable evidence, "
-            f"so the request was handed off to the {retry.value.replace('_', ' ')} specialist."
-        )
-        await self._emit(
-            runtime.context.transition_sink,
-            AgentTransition(
-                event_type="handoff_completed",
-                agent=self.name,
-                node="handoff_assessment",
-                status="completed",
-                message=note,
-                metadata={
-                    "route": retry.value,
-                    "from_route": result.route.value,
-                    "handoff_hop": state["handoffs"] + 1,
-                    "plan_summary": self._plan_summary(retry),
-                },
-            ),
-        )
-        return {
-            "attempted_routes": attempted,
-            "retry_route": retry,
-            "handoffs": state["handoffs"] + 1,
-            "handoff_notes": [*state["handoff_notes"], note],
-        }
-
-    @classmethod
-    def _settled_result(
-        cls, result: AgentExecutionResult, handoffs: int
-    ) -> AgentExecutionResult:
-        """Keep the reported status honest about the specialist that had to be replaced.
-
-        A hand-off only happens because the originally selected specialist failed, so the
-        turn is never a clean success.  If the replacement also came back empty, every
-        specialist that ran found nothing and the turn is insufficient evidence.
-        """
-
-        if handoffs == 0:
-            return result
-        if cls._returned_nothing_usable(result):
-            return result.model_copy(update={"status": ResponseStatus.INSUFFICIENT_EVIDENCE})
-        if result.status is ResponseStatus.COMPLETE:
-            return result.model_copy(update={"status": ResponseStatus.PARTIAL})
-        return result
-
-    @staticmethod
-    def _route_after_assessment(state: RootAgentState) -> str:
-        retry = state["retry_route"]
-        return "synthesize" if retry is None else retry.value
-
-    @classmethod
-    def _handoff_route(
-        cls, result: AgentExecutionResult, attempted: list[str], handoffs: int
-    ) -> AgentRoute | None:
-        if handoffs >= MAX_ROUTE_HANDOFFS or not cls._returned_nothing_usable(result):
-            return None
-        candidate = HANDOFF_ROUTES.get(result.route)
-        if candidate is None or candidate.value in attempted:
-            return None
-        return candidate
-
-    @staticmethod
-    def _returned_nothing_usable(result: AgentExecutionResult) -> bool:
-        if result.route is AgentRoute.ENTERPRISE:
-            # Enterprise answers are tool payloads rather than document evidence.
-            return result.status is ResponseStatus.INSUFFICIENT_EVIDENCE
-        return not result.evidence
-
-    async def _synthesize_node(self, state: RootAgentState) -> dict[str, Any]:
-        result = state["result"]
-        if result is None:
-            raise RuntimeError("The specialist node did not produce a result.")
-        if state["handoff_notes"]:
-            result = result.model_copy(
-                update={"warnings": [*result.warnings, *state["handoff_notes"]]}
-            )
-        if self._synthesizer is not None and result.route is not AgentRoute.OUT_OF_SCOPE:
-            result = await self._synthesized(state["question"], result)
-        return {
-            "result": result,
-            "messages": [AIMessage(content=result.answer)],
-        }
-
-    async def _synthesized(
-        self, question: str, result: AgentExecutionResult
-    ) -> AgentExecutionResult:
-        """Stream the grounded answer, forwarding each chunk as it is generated.
-
-        Chunks are provisional: validation and persistence still run afterwards and the
-        terminal response remains authoritative.  A synthesis failure keeps the
-        deterministic specialist answer so the turn degrades instead of breaking.
-        """
-
-        evidence = "\n\n".join(
-            f"[{index}] {item.title}\n{unwrap_evidence(item.content)[:2_000]}"
-            for index, item in enumerate(result.evidence, start=1)
-        )
-        prompt = (
-            f"User question: {question}\n\n"
-            f"Specialist result:\n{result.answer}\n\n"
-            "Authorized evidence:\n"
-            f"{evidence or 'No document evidence; use only the tool result.'}"
-        )
-        chunks: list[str] = []
-        try:
-            async for chunk in self._synthesizer.astream(prompt):
-                chunks.append(chunk)
-                self._emit_answer_token(chunk)
-            answer = "".join(chunks).strip()
-            if not answer:
-                raise ValueError("The response agent produced an empty answer.")
-            return result.model_copy(update={"answer": answer})
-        except Exception as exc:
-            return result.model_copy(
-                update={
-                    "status": (
-                        ResponseStatus.PARTIAL
-                        if result.status is ResponseStatus.COMPLETE
-                        else result.status
-                    ),
-                    "warnings": [
-                        *result.warnings,
-                        f"Model synthesis was unavailable: {type(exc).__name__}.",
-                    ],
-                }
-            )
-
-    @staticmethod
-    def _emit_answer_token(text: str) -> None:
-        with suppress(RuntimeError):
-            get_stream_writer()({"answer_token": text})
-
-    @staticmethod
-    def _message_history(messages: list[AnyMessage]) -> str:
-        prior = messages[:-1]
-        transcript = "\n".join(
-            f"{message.type.title()}: {message.content}"
-            for message in prior[-20:]
-            if isinstance(message.content, str)
-        )
-        return transcript[-8_000:]
-
-    @staticmethod
-    def _plan_summary(route: AgentRoute) -> str:
-        return {
-            AgentRoute.DIRECT_KNOWLEDGE: "Search authorized knowledge and validate citations.",
-            AgentRoute.RESEARCH: "Run bounded multi-source research and validate findings.",
-            AgentRoute.ANALYSIS: "Retrieve authorized records and run controlled analysis.",
-            AgentRoute.ENTERPRISE: "Call one approved read-only enterprise tool with fallback.",
-            AgentRoute.OUT_OF_SCOPE: "Explain the assistant's approved capabilities and duties.",
-        }[route]
-
-    async def _direct(
-        self,
-        question: str,
-        context: TrustedRequestContext,
-        sink: TransitionSink | None,
-    ) -> AgentExecutionResult:
-        await self._retrieval_transition(sink, "started", 0)
-        result = await self._direct_toolbox.execute(
-            "knowledge_search", {"query": question, "top_k": 6}, context
-        )
-        evidence = [Evidence.model_validate(item) for item in result["evidence"]]
-        warnings = [str(item) for item in result.get("warnings", [])]
-        await self._retrieval_transition(
-            sink,
-            "completed",
-            len(evidence),
-            {
-                "candidate_count": int(result.get("candidate_count", len(evidence))),
-                "selected_evidence_count": len(evidence),
-                "retrieval_mode": str(result.get("retrieval_mode", "hybrid")),
-                "tool_name": "knowledge_search",
-            },
-        )
-        return AgentExecutionResult(
+    return [
+        SpecialistBinding(
             route=AgentRoute.DIRECT_KNOWLEDGE,
-            answer=self._evidence_answer(evidence),
-            status=(
-                ResponseStatus.PARTIAL
-                if any("dense-only" in warning for warning in warnings)
-                else ResponseStatus.COMPLETE
+            tool_name="consult_knowledge_specialist",
+            agent_name=knowledge.name,
+            description=(
+                "Consult the knowledge specialist for a focused lookup in the authorized "
+                "document corpus — policies, runbooks, incidents, architecture, product "
+                "specifications, and meeting notes. Best when one document settles the "
+                "question. Returns its findings and the evidence you may cite."
             ),
-            citations=self._citations(evidence),
-            warnings=warnings
-            if evidence
-            else [*warnings, "No relevant authorized evidence was found."],
-            evidence_ids=[item.evidence_id for item in evidence],
-            evidence=evidence,
+            plan_summary="Search authorized knowledge and validate citations.",
+            run=run_knowledge,
+        ),
+        SpecialistBinding(
+            route=AgentRoute.RESEARCH,
+            tool_name="consult_research_specialist",
+            agent_name=research.name,
+            description=(
+                "Consult the research specialist to investigate across many documents: "
+                "comparisons, recurring causes, contradictions, timelines, or synthesis "
+                "spanning several document families. It plans, searches in parallel, and "
+                "re-plans on what it finds. Slower than a lookup; use it when one document "
+                "cannot answer. Returns grounded findings and the evidence you may cite."
+            ),
+            plan_summary="Run bounded multi-source research and validate findings.",
+            run=run_research,
+        ),
+        SpecialistBinding(
+            route=AgentRoute.ANALYSIS,
+            tool_name="consult_analysis_specialist",
+            agent_name=analysis.name,
+            description=(
+                "Consult the analysis specialist for quantitative questions over the "
+                "document corpus — counts, shares, rankings, distributions, and trends. It "
+                "retrieves the population and runs a controlled aggregation over it. State "
+                "which figure you need. Returns the computed result and citable evidence."
+            ),
+            plan_summary="Retrieve authorized records and run controlled analysis.",
+            run=run_analysis,
+        ),
+        SpecialistBinding(
+            route=AgentRoute.ENTERPRISE,
+            tool_name="consult_enterprise_specialist",
+            agent_name=enterprise.name,
+            description=(
+                "Consult the enterprise specialist for a live system-of-record lookup: the "
+                "employee directory, the service catalog, or the incident system. Use it for "
+                "ownership, on-call, staffing, and single incident records. It reads systems, "
+                "not documents, so it returns field values rather than citable evidence."
+            ),
+            plan_summary="Call approved read-only enterprise tools with fallback.",
+            run=run_enterprise,
+        ),
+    ]
+
+
+def _delegation_tool(binding: SpecialistBinding) -> StructuredTool:
+    """Publish one specialist as a tool the root can call, narrating it as it runs.
+
+    The activity stream is written here rather than by the model, so the panel reflects
+    consultations that happened. An authorization denial is deliberately left to
+    propagate: a refused capability ends the request instead of becoming a tool result
+    the model could route around.
+    """
+
+    async def call(request: str) -> str:
+        runtime = get_runtime(RootAgentContext)
+        context = runtime.context
+        relay = _relay_sink(context.transition_sink)
+        await relay(_routing_transition(binding, context.ledger.records))
+        await relay(_subagent_transition(binding.agent_name, "started"))
+        outcome = await binding.run(request, context.request_context, relay, context.thread_id)
+        context.ledger.record(binding.route, outcome)
+        await relay(_subagent_transition(binding.agent_name, "completed"))
+        return _reply(outcome, context.ledger)
+
+    return StructuredTool.from_function(
+        coroutine=call,
+        name=binding.tool_name,
+        description=binding.description,
+        args_schema=DelegationRequest,
+    )
+
+
+def _reply(outcome: SpecialistOutcome, ledger: DelegationLedger) -> str:
+    """Hand the specialist's report back with the citation markers it earned.
+
+    Markers are assigned from the ledger, not by the specialist and not by the root, so
+    the number the model is told to write is the number the returned citation carries.
+    """
+
+    sections = [outcome.report]
+    evidence = ledger.ordered_evidence()
+    if evidence:
+        sections.append(
+            "Authorized evidence you may cite (use these exact markers):\n"
+            + "\n".join(f"[{index}] {item.title}" for index, item in enumerate(evidence, start=1))
         )
+    if outcome.warnings:
+        sections.append("Limitations: " + " ".join(outcome.warnings))
+    if not outcome.grounded:
+        sections.append(
+            "This specialist found nothing usable. Do not consult it again for this "
+            "objective; either try a different specialist or say the answer is unavailable."
+        )
+    return "\n\n".join(sections)
 
-    async def _delegate_research(
-        self,
-        question: str,
-        context: TrustedRequestContext,
-        sink: TransitionSink | None,
-        thread_id: str | None,
-    ) -> AgentExecutionResult:
-        await self._subagent_transition(sink, self._research.name, "started")
-        execution = await self._research.run(question, context, sink, thread_id)
-        await self._subagent_transition(sink, self._research.name, "completed")
-        return self._research_response(execution)
 
-    async def _delegate_analysis(
-        self,
-        question: str,
-        context: TrustedRequestContext,
-        sink: TransitionSink | None,
-    ) -> AgentExecutionResult:
-        await self._subagent_transition(sink, self._analysis.name, "started")
-        execution = await self._analysis.run(question, context, sink)
-        await self._subagent_transition(sink, self._analysis.name, "completed")
-        return self._analysis_response(execution)
+def _result(answer: str, ledger: DelegationLedger) -> AgentExecutionResult:
+    """Assemble the turn from what ran, not from what the model said it did."""
+    route = ledger.route()
+    evidence = ledger.ordered_evidence()
+    if route is AgentRoute.OUT_OF_SCOPE:
+        return AgentExecutionResult(route=route, answer=CAPABILITIES_ANSWER)
+    return AgentExecutionResult(
+        route=route,
+        answer=answer or evidence_summary(evidence),
+        status=ledger.status(),
+        citations=ledger.citations(),
+        warnings=list(ledger.warnings),
+        evidence_ids=[item.evidence_id for item in evidence],
+        evidence=evidence,
+    )
 
-    async def _delegate_enterprise(
-        self,
-        question: str,
-        context: TrustedRequestContext,
-        sink: TransitionSink | None,
-    ) -> AgentExecutionResult:
-        await self._subagent_transition(sink, self._enterprise.name, "started")
-        execution = await self._enterprise.run(question, context, sink)
-        await self._subagent_transition(sink, self._enterprise.name, "completed")
-        # An empty system-of-record read reports insufficient evidence; the assessment
-        # node decides whether a document lookup should be tried instead.
-        return self._enterprise_response(execution)
 
-    @staticmethod
-    async def _emit(sink: TransitionSink | None, transition: AgentTransition) -> None:
-        with suppress(RuntimeError):
-            get_stream_writer()(transition.model_dump(mode="json"))
+def _relay_sink(sink: TransitionSink | None) -> TransitionSink:
+    """Fan one specialist's activity onto the graph stream and any direct sink."""
+    writer: Callable[[Any], None] | None = None
+    with suppress(RuntimeError):
+        writer = get_stream_writer()
+
+    async def relay(transition: AgentTransition) -> None:
+        if writer is not None:
+            writer(transition.model_dump(mode="json"))
         if sink is not None:
             await sink(transition)
 
-    async def _retrieval_transition(
-        self,
-        sink: TransitionSink | None,
-        status: str,
-        evidence_count: int,
-        metadata: dict[str, object] | None = None,
-    ) -> None:
-        await self._emit(
-            sink,
-            AgentTransition(
-                event_type=f"retrieval_{status}",
-                agent=self.name,
-                node="knowledge_search",
-                status=status,
-                message=(
-                    "Searching authorized knowledge."
-                    if status == "started"
-                    else f"Retrieved {evidence_count} authorized evidence records."
-                ),
-                metadata=(
-                    {"evidence_count": evidence_count, **(metadata or {})}
-                    if status == "completed"
-                    else {}
-                ),
-            ),
+    return relay
+
+
+async def _publish(sink: TransitionSink | None, transition: AgentTransition) -> None:
+    with suppress(RuntimeError):
+        get_stream_writer()(transition.model_dump(mode="json"))
+    if sink is not None:
+        await sink(transition)
+
+
+def _started_transition() -> AgentTransition:
+    return AgentTransition(
+        event_type="agent_started",
+        agent=RootOrchestrator.name,
+        node="intent_routing",
+        status="started",
+        message="Root agent is deciding which specialists the request needs.",
+    )
+
+
+def _routing_transition(
+    binding: SpecialistBinding, previous: list[DelegationRecord]
+) -> AgentTransition:
+    """Narrate a delegation, distinguishing the first choice from a recovery.
+
+    A second consultation after an empty one is the hand-off the graph used to encode as
+    a fixed edge. It is now the model's decision, so it is reported when it happens
+    rather than assumed from a table.
+    """
+
+    empty = [item for item in previous if not item.grounded]
+    if not previous or not empty:
+        return AgentTransition(
+            event_type="routing_completed",
+            agent=RootOrchestrator.name,
+            node="intent_routing",
+            status="completed",
+            message=f"Selected {binding.route.value} route.",
+            metadata={"route": binding.route.value, "plan_summary": binding.plan_summary},
         )
+    origin = empty[-1].route
+    return AgentTransition(
+        event_type="handoff_completed",
+        agent=RootOrchestrator.name,
+        node="handoff_assessment",
+        status="completed",
+        message=(
+            f"The {origin.value.replace('_', ' ')} specialist found no usable evidence, "
+            f"so the request was handed off to the "
+            f"{binding.route.value.replace('_', ' ')} specialist."
+        ),
+        metadata={
+            "route": binding.route.value,
+            "from_route": origin.value,
+            "handoff_hop": len(empty),
+            "plan_summary": binding.plan_summary,
+        },
+    )
 
-    async def _subagent_transition(
-        self, sink: TransitionSink | None, agent: str, status: str
-    ) -> None:
-        await self._emit(
-            sink,
-            AgentTransition(
-                event_type=f"subagent_{status}",
-                agent=agent,
-                node="delegation",
-                status=status,
-                message=f"{agent.replace('_', ' ').title()} {status}.",
-            ),
+
+def _subagent_transition(agent: str, status: str) -> AgentTransition:
+    return AgentTransition(
+        event_type=f"subagent_{status}",
+        agent=agent,
+        node="delegation",
+        status=status,
+        message=f"{agent.replace('_', ' ').title()} {status}.",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RootModelChunk:
+    text: str
+    message_id: str
+    has_tool_calls: bool
+
+
+def _parse_root_model_chunk(part: Any) -> _RootModelChunk | None:
+    """Read one streamed chunk from the root model node.
+
+    Specialist loops run inside a delegation tool, so their prose arrives tagged with the
+    tool node. Filtering on the root's model node is what keeps a specialist's internal
+    reasoning out of the answer the user sees. Messages that include tool calls are
+    planning turns rather than the final answer, so their narration is excluded.
+    """
+
+    if not isinstance(part, tuple) or len(part) != 2:
+        return None
+    chunk, metadata = part
+    if not isinstance(metadata, dict) or metadata.get("langgraph_node") != "model":
+        return None
+    message_id = getattr(chunk, "id", None)
+    if not message_id:
+        message_id = metadata.get("checkpoint_ns") or metadata.get("langgraph_step")
+    if not isinstance(message_id, str) or not message_id:
+        message_id = "root-model"
+    tool_calls = getattr(chunk, "tool_calls", None) or []
+    invalid_tool_calls = getattr(chunk, "invalid_tool_calls", None) or []
+    has_tool_calls = bool(tool_calls or invalid_tool_calls)
+    content = getattr(chunk, "content", None)
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "".join(
+            str(block.get("text", ""))
+            for block in content
+            if isinstance(block, dict) and block.get("type") in {"text", None}
         )
+    else:
+        text = ""
+    if not text and not has_tool_calls:
+        return None
+    return _RootModelChunk(text=text, message_id=message_id, has_tool_calls=has_tool_calls)
 
-    @staticmethod
-    def _evidence_answer(evidence: list[Evidence]) -> str:
-        if not evidence:
-            return "I could not find authorized evidence that answers this question."
-        lines = ["I found the following relevant Commercial Bank evidence:"]
-        for index, item in enumerate(evidence, start=1):
-            lines.append(
-                f"- {item.title}: {_first_sentence(unwrap_evidence(item.content))} [{index}]"
-            )
-        return "\n".join(lines)
 
-    @classmethod
-    def _research_response(cls, execution: ResearchExecution) -> AgentExecutionResult:
-        lines = [execution.result.summary]
-        for finding in execution.result.findings:
-            lines.append(f"- {finding.claim}")
-        return AgentExecutionResult(
-            route=AgentRoute.RESEARCH,
-            answer="\n".join(lines),
-            status=(
-                ResponseStatus.PARTIAL if execution.result.partial else ResponseStatus.COMPLETE
-            ),
-            citations=cls._citations(execution.evidence),
-            warnings=execution.result.warnings,
-            evidence_ids=execution.result.evidence_ids,
-            evidence=execution.evidence,
-        )
+def _final_root_answer(
+    message_text: dict[str, str],
+    ordered_message_ids: list[str],
+    tool_call_message_ids: set[str],
+) -> str:
+    """Keep the last root model message that was prose rather than a tool-planning turn."""
 
-    @classmethod
-    def _analysis_response(cls, execution: AnalysisExecution) -> AgentExecutionResult:
-        lines = [
-            f"Processed {execution.result.rows_processed} authorized evidence records using "
-            f"{execution.result.operation}."
-        ]
-        for row in execution.result.results:
-            label = row.get("value", row.get("date", "unknown"))
-            suffix = f" ({row['percentage']}%)" if "percentage" in row else ""
-            lines.append(f"- {label}: {row['count']}{suffix}")
-        return AgentExecutionResult(
-            route=AgentRoute.ANALYSIS,
-            answer="\n".join(lines),
-            citations=cls._citations(execution.evidence),
-            warnings=execution.result.warnings,
-            evidence_ids=[item.evidence_id for item in execution.evidence],
-            evidence=execution.evidence,
-        )
+    for message_id in reversed(ordered_message_ids):
+        if message_id in tool_call_message_ids:
+            continue
+        text = message_text.get(message_id, "").strip()
+        if text:
+            return text
+    return ""
 
-    @staticmethod
-    def _enterprise_response(execution: EnterpriseExecution) -> AgentExecutionResult:
-        result = execution.result
-        answer = (
-            f"Enterprise tool `{result.tool_name}` returned: {result.data}"
-            if result.data
-            else "The requested enterprise data source is not available."
-        )
-        return AgentExecutionResult(
-            route=AgentRoute.ENTERPRISE,
-            answer=answer,
-            status=(
-                ResponseStatus.PARTIAL
-                if result.data and result.warnings
-                else ResponseStatus.INSUFFICIENT_EVIDENCE
-                if not result.data
-                else ResponseStatus.COMPLETE
-            ),
-            warnings=result.warnings,
-        )
 
-    @staticmethod
-    def _citations(evidence: list[Evidence]) -> list[Citation]:
-        return [
-            Citation(
-                citation_id=str(index),
-                evidence_id=item.evidence_id,
-                document_id=item.document_id,
-                title=item.title,
-                chunk_id=item.chunk_id,
-                source_path=str(item.metadata["source_path"]),
-            )
-            for index, item in enumerate(evidence, start=1)
-        ]
+def _timeout_result(answer: str, ledger: DelegationLedger) -> AgentExecutionResult:
+    """Return the best available turn when the request deadline is reached."""
 
-    @staticmethod
-    def _with_conversation_context(question: str, summary: str) -> str:
-        question = question.strip()
-        if len(question) >= KNOWLEDGE_QUERY_MAX_LENGTH:
-            return question[:KNOWLEDGE_QUERY_MAX_LENGTH]
-        if not summary:
-            return question
+    warnings = [*ledger.warnings, "The request reached its execution time limit before completing."]
+    result = _result(answer.strip(), ledger)
+    if result.status is ResponseStatus.COMPLETE:
+        return result.model_copy(update={"status": ResponseStatus.PARTIAL, "warnings": warnings})
+    return result.model_copy(update={"warnings": warnings})
 
-        separator = "\n\nPrior conversation summary:\n"
-        remaining = KNOWLEDGE_QUERY_MAX_LENGTH - len(question) - len(separator)
-        if remaining <= 0:
-            return question
-        return f"{question}{separator}{summary[-remaining:]}"
+
+def _with_conversation_context(question: str, summary: str) -> str:
+    question = question.strip()
+    if len(question) >= ROOT_QUESTION_MAX_CHARACTERS:
+        return question[:ROOT_QUESTION_MAX_CHARACTERS]
+    if not summary:
+        return question
+
+    separator = "\n\nPrior conversation summary:\n"
+    remaining = ROOT_QUESTION_MAX_CHARACTERS - len(question) - len(separator)
+    if remaining <= 0:
+        return question
+    return f"{question}{separator}{summary[-remaining:]}"

@@ -14,6 +14,7 @@ SAFE_ACTIVITY_METADATA_KEYS = frozenset(
         "finding_count",
         "from_route",
         "handoff_hop",
+        "langsmith_run_id",
         "message_count",
         "partial",
         "plan_summary",
@@ -77,7 +78,8 @@ def sanitize_activity_metadata(metadata: dict[str, Any] | None) -> dict[str, Any
 
 @dataclass(slots=True)
 class ActivityPanelState:
-    trace_id: str = ""
+    request_id: str = ""
+    langsmith_run_id: str = ""
     current_agent: str = "Waiting"
     current_node: str = "—"
     plan_summary: str = "No plan yet"
@@ -97,7 +99,9 @@ def project_activity_panel(events: list[dict[str, Any]]) -> ActivityPanelState:
     state = ActivityPanelState()
     for event in events:
         metadata = sanitize_activity_metadata(event.get("metadata"))
-        state.trace_id = str(event.get("request_id", state.trace_id))
+        state.request_id = str(event.get("request_id", state.request_id))
+        if metadata.get("langsmith_run_id"):
+            state.langsmith_run_id = str(metadata["langsmith_run_id"])
         if event.get("agent"):
             state.current_agent = str(event["agent"])
         if event.get("node"):

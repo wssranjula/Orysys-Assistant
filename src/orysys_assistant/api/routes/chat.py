@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator
+from contextlib import ExitStack
 from time import perf_counter
 from typing import cast
 from uuid import UUID, uuid4
@@ -44,7 +45,12 @@ from orysys_assistant.memory.models import ConversationRecord
 from orysys_assistant.memory.repository import ConversationRepository
 from orysys_assistant.observability.activity import sanitize_activity_metadata
 from orysys_assistant.observability.logging import get_logger
-from orysys_assistant.observability.tracing import get_langsmith_client
+from orysys_assistant.observability.tracing import (
+    fail_chat_request_trace,
+    finish_chat_request_trace,
+    get_langsmith_client,
+    start_chat_request_trace,
+)
 from orysys_assistant.security.models import TrustedRequestContext
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
@@ -115,6 +121,7 @@ async def stream_chat_events(
     )
 
     try:
+        chat_run = None
         await _ensure_connected(request)
         yield _sse(
             "activity",
@@ -181,70 +188,100 @@ async def stream_chat_events(
             if settings.langsmith_enabled and settings.langsmith_api_key
             else None
         )
-        with tracing_context(
-            enabled=settings.langsmith_enabled,
+        chat_run = start_chat_request_trace(
             client=langsmith_client,
             project_name=settings.langsmith_project,
-            metadata={
-                "request_id": str(request_id),
-                "conversation_id": str(conversation_id),
-                "role": context.identity.role.value,
-                "agent_name": orchestrator.name,
-            },
-        ):
+            enabled=settings.langsmith_enabled,
+            request_id=str(request_id),
+            conversation_id=str(conversation_id),
+            role=context.identity.role.value,
+            agent_name=orchestrator.name,
+            message=payload.message,
+        )
+        if chat_run is not None:
+            yield _sse(
+                "activity",
+                _activity(
+                    event_type=ActivityEventType.REQUEST_RECEIVED,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    status=ActivityStatus.COMPLETED,
+                    message="LangSmith tracing is active for this request.",
+                    node="tracing",
+                    metadata={"langsmith_run_id": str(chat_run.id)},
+                ),
+            )
+
+        trace_stack = ExitStack()
+        trace_stack.enter_context(
+            tracing_context(
+                enabled=settings.langsmith_enabled,
+                client=langsmith_client,
+                project_name=settings.langsmith_project,
+                parent=chat_run,
+                metadata={
+                    "request_id": str(request_id),
+                    "conversation_id": str(conversation_id),
+                    "role": context.identity.role.value,
+                    "agent_name": orchestrator.name,
+                },
+                tags=[context.identity.role.value, f"request:{request_id}"],
+            )
+        )
+        try:
             stream_method = getattr(orchestrator, "stream", None)
             if stream_method is not None:
                 result = None
-                async with asyncio.timeout(settings.request_timeout_seconds):
-                    async for update in stream_method(
-                        payload.message,
-                        context,
-                        conversation.summary,
-                        f"{context.identity.user_id}:{conversation_id}",
-                        preference_context,
-                    ):
-                        await _ensure_connected(request)
-                        if isinstance(update, AgentTransition):
+                async for update in stream_method(
+                    payload.message,
+                    context,
+                    conversation.summary,
+                    f"{context.identity.user_id}:{conversation_id}",
+                    preference_context,
+                    timeout_seconds=settings.request_timeout_seconds,
+                ):
+                    await _ensure_connected(request)
+                    if isinstance(update, AgentTransition):
+                        yield _sse(
+                            "activity",
+                            _activity(
+                                event_type=ActivityEventType(update.event_type),
+                                request_id=request_id,
+                                conversation_id=conversation_id,
+                                status=ActivityStatus(update.status),
+                                message=update.message,
+                                agent=update.agent,
+                                node=update.node,
+                                metadata=update.metadata,
+                            ),
+                        )
+                    elif isinstance(update, AnswerToken):
+                        if streamed_tokens == 0:
                             yield _sse(
                                 "activity",
                                 _activity(
-                                    event_type=ActivityEventType(update.event_type),
+                                    event_type=ActivityEventType.ANSWER_STREAMING,
                                     request_id=request_id,
                                     conversation_id=conversation_id,
-                                    status=ActivityStatus(update.status),
-                                    message=update.message,
-                                    agent=update.agent,
-                                    node=update.node,
-                                    metadata=update.metadata,
+                                    status=ActivityStatus.STARTED,
+                                    message="Response agent is generating the answer.",
+                                    agent=orchestrator.name,
+                                    node="answer_stream",
                                 ),
                             )
-                        elif isinstance(update, AnswerToken):
-                            if streamed_tokens == 0:
-                                yield _sse(
-                                    "activity",
-                                    _activity(
-                                        event_type=ActivityEventType.ANSWER_STREAMING,
-                                        request_id=request_id,
-                                        conversation_id=conversation_id,
-                                        status=ActivityStatus.STARTED,
-                                        message="Response agent is generating the answer.",
-                                        agent=orchestrator.name,
-                                        node="answer_stream",
-                                    ),
-                                )
-                            yield _sse(
-                                "answer_delta",
-                                AnswerDelta(
-                                    request_id=request_id,
-                                    conversation_id=conversation_id,
-                                    sequence=streamed_tokens,
-                                    text=update.text,
-                                    provisional=True,
-                                ),
-                            )
-                            streamed_tokens += 1
-                        else:
-                            result = update
+                        yield _sse(
+                            "answer_delta",
+                            AnswerDelta(
+                                request_id=request_id,
+                                conversation_id=conversation_id,
+                                sequence=streamed_tokens,
+                                text=update.text,
+                                provisional=True,
+                            ),
+                        )
+                        streamed_tokens += 1
+                    else:
+                        result = update
                 if result is None:
                     raise RuntimeError("The agent graph stream completed without a result.")
             else:
@@ -287,122 +324,136 @@ async def stream_chat_events(
                     await asyncio.gather(agent_task, return_exceptions=True)
                     raise
 
-        yield _sse(
-            "activity",
-            _activity(
-                event_type=ActivityEventType.VALIDATION_STARTED,
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=ActivityStatus.STARTED,
-                message="Validating grounding, citations, and response policy.",
-                node="output_validation",
-            ),
-        )
-        validation = (output_validator or OutputValidator()).validate(result, context.access_scope)
-        result = validation.result
-        if validation.valid:
             yield _sse(
                 "activity",
                 _activity(
-                    event_type=ActivityEventType.VALIDATION_COMPLETED,
-                    request_id=request_id,
-                    conversation_id=conversation_id,
-                    status=ActivityStatus.COMPLETED,
-                    message="Grounding and response contracts validated.",
-                    node="output_validation",
-                    metadata={"repaired": validation.repaired},
-                ),
-            )
-        else:
-            yield _sse(
-                "activity",
-                _activity(
-                    event_type=ActivityEventType.VALIDATION_FAILED,
-                    request_id=request_id,
-                    conversation_id=conversation_id,
-                    status=ActivityStatus.DEGRADED,
-                    message="Response validation failed; returning insufficient evidence.",
-                    node="output_validation",
-                    metadata={"repair_attempted": validation.repaired},
-                ),
-            )
-
-        conversation = await repository.append_turn(
-            conversation_id,
-            context.identity.user_id,
-            payload.message,
-            result.answer,
-            result.evidence_ids,
-        )
-        yield _sse(
-            "activity",
-            _activity(
-                event_type=ActivityEventType.MEMORY_UPDATED,
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=ActivityStatus.COMPLETED,
-                message="Saved the conversation turn and evidence references.",
-                node="conversation_memory",
-                metadata={"message_count": len(conversation.messages)},
-            ),
-        )
-
-        if streamed_tokens == 0:
-            # No model tokens were produced (deterministic profile, an injected adapter,
-            # or a synthesis failure), so replay the validated answer word by word.
-            yield _sse(
-                "activity",
-                _activity(
-                    event_type=ActivityEventType.ANSWER_STREAMING,
+                    event_type=ActivityEventType.VALIDATION_STARTED,
                     request_id=request_id,
                     conversation_id=conversation_id,
                     status=ActivityStatus.STARTED,
-                    message="Streaming the grounded answer.",
-                    agent=orchestrator.name,
-                    node="answer_stream",
+                    message="Validating grounding, citations, and response policy.",
+                    node="output_validation",
                 ),
             )
-            for sequence, token in enumerate(re.findall(r"\S+\s*", result.answer)):
-                await _ensure_connected(request)
+            validator = output_validator or OutputValidator()
+            validation = validator.validate(result, context.access_scope)
+            result = validation.result
+            if validation.valid:
                 yield _sse(
-                    "answer_delta",
-                    AnswerDelta(
+                    "activity",
+                    _activity(
+                        event_type=ActivityEventType.VALIDATION_COMPLETED,
                         request_id=request_id,
                         conversation_id=conversation_id,
-                        sequence=sequence,
-                        text=token,
+                        status=ActivityStatus.COMPLETED,
+                        message="Grounding and response contracts validated.",
+                        node="output_validation",
+                        metadata={"repaired": validation.repaired},
                     ),
                 )
-                if settings.mock_token_delay_seconds:
-                    await asyncio.sleep(settings.mock_token_delay_seconds)
+            else:
+                yield _sse(
+                    "activity",
+                    _activity(
+                        event_type=ActivityEventType.VALIDATION_FAILED,
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        status=ActivityStatus.DEGRADED,
+                        message="Response validation failed; returning insufficient evidence.",
+                        node="output_validation",
+                        metadata={"repair_attempted": validation.repaired},
+                    ),
+                )
 
-        duration_ms = round((perf_counter() - started) * 1_000, 2)
-        yield _sse(
-            "activity",
-            _activity(
-                event_type=ActivityEventType.REQUEST_COMPLETED,
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=ActivityStatus.COMPLETED,
-                message="Request completed.",
-                node="request_exit",
-                metadata={"duration_ms": duration_ms},
-            ),
-        )
-        yield _sse(
-            "final",
-            FinalResponse(
-                request_id=request_id,
-                conversation_id=conversation_id,
-                status=result.status,
-                answer=result.answer,
-                citations=result.citations,
-                warnings=result.warnings,
-                degraded=result.status is not ResponseStatus.COMPLETE,
-            ),
-        )
-        logger.info("chat_stream_completed", duration_ms=duration_ms, result="complete")
+            conversation = await repository.append_turn(
+                conversation_id,
+                context.identity.user_id,
+                payload.message,
+                result.answer,
+                result.evidence_ids,
+            )
+            yield _sse(
+                "activity",
+                _activity(
+                    event_type=ActivityEventType.MEMORY_UPDATED,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    status=ActivityStatus.COMPLETED,
+                    message="Saved the conversation turn and evidence references.",
+                    node="conversation_memory",
+                    metadata={"message_count": len(conversation.messages)},
+                ),
+            )
+
+            if streamed_tokens == 0:
+                # No model tokens were produced (deterministic profile, an injected adapter,
+                # or a synthesis failure), so replay the validated answer word by word.
+                yield _sse(
+                    "activity",
+                    _activity(
+                        event_type=ActivityEventType.ANSWER_STREAMING,
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        status=ActivityStatus.STARTED,
+                        message="Streaming the grounded answer.",
+                        agent=orchestrator.name,
+                        node="answer_stream",
+                    ),
+                )
+                for sequence, token in enumerate(re.findall(r"\S+\s*", result.answer)):
+                    await _ensure_connected(request)
+                    yield _sse(
+                        "answer_delta",
+                        AnswerDelta(
+                            request_id=request_id,
+                            conversation_id=conversation_id,
+                            sequence=sequence,
+                            text=token,
+                        ),
+                    )
+                    if settings.mock_token_delay_seconds:
+                        await asyncio.sleep(settings.mock_token_delay_seconds)
+
+            duration_ms = round((perf_counter() - started) * 1_000, 2)
+            finish_chat_request_trace(
+                chat_run,
+                result=result,
+                validation=validation,
+                duration_ms=duration_ms,
+            )
+            yield _sse(
+                "activity",
+                _activity(
+                    event_type=ActivityEventType.REQUEST_COMPLETED,
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    status=ActivityStatus.COMPLETED,
+                    message="Request completed.",
+                    node="request_exit",
+                    metadata={"duration_ms": duration_ms},
+                ),
+            )
+            yield _sse(
+                "final",
+                FinalResponse(
+                    request_id=request_id,
+                    conversation_id=conversation_id,
+                    status=result.status,
+                    answer=result.answer,
+                    citations=result.citations,
+                    warnings=result.warnings,
+                    degraded=result.status is not ResponseStatus.COMPLETE,
+                ),
+            )
+            logger.info("chat_stream_completed", duration_ms=duration_ms, result="complete")
+        finally:
+            trace_stack.close()
     except ClientDisconnectedError:
+        fail_chat_request_trace(
+            chat_run,
+            error="client disconnected",
+            error_code="client_disconnected",
+        )
         logger.info(
             "chat_stream_cancelled",
             duration_ms=round((perf_counter() - started) * 1_000, 2),
@@ -410,6 +461,7 @@ async def stream_chat_events(
         )
         return
     except asyncio.CancelledError:
+        fail_chat_request_trace(chat_run, error="task cancelled", error_code="task_cancelled")
         logger.info(
             "chat_stream_cancelled",
             duration_ms=round((perf_counter() - started) * 1_000, 2),
@@ -417,6 +469,11 @@ async def stream_chat_events(
         )
         raise
     except (AuthorizationError, RetrievalUnavailableError, ToolTimeoutError, TimeoutError) as exc:
+        fail_chat_request_trace(
+            chat_run,
+            error=str(exc),
+            error_code=getattr(exc, "code", type(exc).__name__),
+        )
         logger.warning(
             "chat_stream_degraded", error_type=type(exc).__name__, result="insufficient_evidence"
         )
@@ -444,6 +501,7 @@ async def stream_chat_events(
             ),
         )
     except ApplicationError as exc:
+        fail_chat_request_trace(chat_run, error=exc.message, error_code=exc.code)
         logger.warning("chat_stream_failed", error_type=type(exc).__name__, result=exc.code)
         yield _sse(
             "activity",
@@ -469,6 +527,7 @@ async def stream_chat_events(
             ),
         )
     except Exception as exc:
+        fail_chat_request_trace(chat_run, error=str(exc), error_code=type(exc).__name__)
         logger.exception("chat_stream_failed", error_type=type(exc).__name__, result="failed")
         failure = _activity(
             event_type=ActivityEventType.REQUEST_FAILED,

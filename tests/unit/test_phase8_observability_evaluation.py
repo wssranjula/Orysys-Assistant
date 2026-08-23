@@ -103,7 +103,7 @@ def test_activity_projection_exposes_evaluator_summary_without_reasoning() -> No
 
     state = project_activity_panel(events)
 
-    assert state.trace_id == "trace-123"
+    assert state.request_id == "trace-123"
     assert state.current_agent == "research_subagent"
     assert state.current_node == "output_validation"
     assert state.tool_name == "knowledge_search"

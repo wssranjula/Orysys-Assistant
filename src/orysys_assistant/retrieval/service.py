@@ -7,6 +7,7 @@ from typing import Any, cast
 from langsmith import traceable
 
 from orysys_assistant.domain.errors import RetrievalUnavailableError
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.retrieval.embeddings import EmbeddingProvider
 from orysys_assistant.retrieval.models import Evidence, SearchFilters, SearchMatch
 from orysys_assistant.retrieval.reranking import Reranker
@@ -50,7 +51,11 @@ class RetrievalService:
         self._minimum_sparse_score = minimum_sparse_score
         self._reranker = reranker
 
-    @traceable(name="hybrid-knowledge-retrieval", run_type="retriever")
+    @traceable(
+        name="hybrid-knowledge-retrieval",
+        run_type="retriever",
+        tags=app_span_tags("retrieval"),
+    )
     async def search(
         self,
         query: str,
@@ -93,10 +98,12 @@ class RetrievalService:
         evidence = self._combine(dense_matches, sparse_matches)
         if not sparse_degraded:
             evidence = [
-                item for item in evidence if (item.sparse_score or 0) >= self._minimum_sparse_score
+                item
+                for item in evidence
+                if item.sparse_score is None or item.sparse_score >= self._minimum_sparse_score
             ]
         evidence = (
-            self._reranker.rerank(query, evidence, top_k)
+            await asyncio.to_thread(self._reranker.rerank, query, evidence, top_k)
             if self._reranker is not None
             else evidence[:top_k]
         )

@@ -35,6 +35,15 @@ class HybridLexicalReranker:
         rescored: list[Evidence] = []
         for candidate in candidates:
             searchable = f"{candidate.title} {candidate.content}".lower()
+            metadata = candidate.metadata
+            document_type = str(metadata.get("document_type", "")).lower()
+            query_lower = query.lower()
+            title_bonus = (
+                0.15 if any(token in candidate.title.lower() for token in query_tokens) else 0.0
+            )
+            type_bonus = (
+                0.1 if document_type and document_type.replace("_", " ") in query_lower else 0.0
+            )
             candidate_tokens = set(_TOKEN_PATTERN.findall(searchable))
             token_coverage = (
                 len(query_tokens & candidate_tokens) / len(query_tokens) if query_tokens else 0.0
@@ -45,10 +54,14 @@ class HybridLexicalReranker:
                 if identifiers
                 else 0.0
             )
-            lexical_score = 0.8 * token_coverage + 0.2 * identifier_coverage
-            rerank_score = (
-                1 - self._lexical_weight
-            ) * candidate.final_score + self._lexical_weight * lexical_score
+            lexical_score = (
+                0.8 * token_coverage + 0.2 * identifier_coverage + title_bonus + type_bonus
+            )
+            rerank_score = min(
+                1.0,
+                (1 - self._lexical_weight) * candidate.final_score
+                + self._lexical_weight * lexical_score,
+            )
             rescored.append(
                 candidate.model_copy(
                     update={

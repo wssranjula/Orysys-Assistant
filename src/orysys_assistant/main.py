@@ -21,7 +21,9 @@ from orysys_assistant.api.routes import (
 from orysys_assistant.config import Settings, get_settings
 from orysys_assistant.guardrails.input import InputGuard
 from orysys_assistant.guardrails.output import OutputValidator
+from orysys_assistant.memory.feedback_repository import InMemoryFeedbackRepository
 from orysys_assistant.memory.runtime import MemoryRuntime
+from orysys_assistant.observability.agent_tracing import configure_agent_tracing
 from orysys_assistant.observability.logging import configure_logging, get_logger
 from orysys_assistant.retrieval.runtime import AgentRuntimeManager
 from orysys_assistant.security.access_scope import AccessScopeService
@@ -32,7 +34,6 @@ from orysys_assistant.tools.admin import DummyIncidentWriteStore, modify_inciden
 from orysys_assistant.tools.gateway import ToolGateway
 
 if TYPE_CHECKING:
-    from orysys_assistant.agent.router import AgentRouter
     from orysys_assistant.tools.mcp_client import EnterpriseClient
 
 
@@ -40,10 +41,12 @@ def create_app(
     settings: Settings | None = None,
     rate_limiter: TokenBucketRateLimiter | None = None,
     enterprise_client: "EnterpriseClient | None" = None,
-    agent_router: "AgentRouter | None" = None,
+    agent_model: object | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
+    if resolved_settings.langsmith_enabled and resolved_settings.langsmith_quiet_middleware_traces:
+        configure_agent_tracing(quiet_middleware=True)
     logger = get_logger()
     authentication = AuthenticationService(resolved_settings)
     access_scope_service = AccessScopeService(resolved_settings)
@@ -53,6 +56,7 @@ def create_app(
     incident_write_store = DummyIncidentWriteStore()
     tool_gateway.register(modify_incident_spec(incident_write_store))
     memory_runtime = MemoryRuntime(resolved_settings)
+    feedback_repository = InMemoryFeedbackRepository()
     approval_service = ApprovalService(
         tool_gateway,
         resolved_settings.database_url if resolved_settings.memory_backend == "postgres" else None,
@@ -62,7 +66,7 @@ def create_app(
         tool_gateway,
         memory_runtime,
         enterprise_client=enterprise_client,
-        agent_router=agent_router,
+        agent_model=agent_model,
     )
 
     @asynccontextmanager
@@ -94,6 +98,7 @@ def create_app(
     app.state.tool_gateway = tool_gateway
     app.state.agent_runtime = agent_runtime
     app.state.memory_runtime = memory_runtime
+    app.state.feedback_repository = feedback_repository
     app.state.approval_service = approval_service
     app.state.incident_write_store = incident_write_store
     app.state.input_guard = InputGuard()

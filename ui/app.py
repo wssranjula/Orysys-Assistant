@@ -33,70 +33,155 @@ def iter_sse(response: httpx.Response) -> Iterator[tuple[str, dict[str, Any]]]:
         yield event_name, json.loads("\n".join(data_lines))
 
 
-def render_activity(events: list[dict[str, Any]], placeholder: Any) -> None:
-    if not events:
-        placeholder.info("Agent activity will appear here.")
-        return
-    panel = project_activity_panel(events)
-    with placeholder.container():
-        if panel.degraded:
-            st.warning("This request is operating in partial or degraded mode.")
-        st.caption(f"Trace ID: `{panel.trace_id}`")
-        agent_column, node_column = st.columns(2)
-        agent_column.caption("Current agent")
-        agent_column.markdown(f"**{panel.current_agent.replace('_', ' ').title()}**")
-        node_column.caption("Graph node")
-        node_column.markdown(f"**`{panel.current_node}`**")
-        st.info(panel.plan_summary)
-        if panel.research_todos:
-            st.markdown("##### Research tasks")
-            for todo in panel.research_todos:
+def _status_badge(label: str, value: str) -> str:
+    tone = {
+        "completed": "#1f7a4d",
+        "in_progress": "#2563eb",
+        "started": "#2563eb",
+        "pending": "#64748b",
+        "failed": "#dc2626",
+        "denied": "#dc2626",
+        "degraded": "#d97706",
+    }.get(value.lower(), "#64748b")
+    return (
+        f'<span style="display:inline-block;padding:0.15rem 0.55rem;border-radius:999px;'
+        f'font-size:0.75rem;font-weight:600;background:{tone}22;color:{tone};'
+        f'border:1px solid {tone}44;">{label}: {value.replace("_", " ").title()}</span>'
+    )
+
+
+def render_activity_timeline(
+    events: list[dict[str, Any]],
+    placeholder: Any | None = None,
+    *,
+    expanded: bool = False,
+    processing: bool = False,
+) -> None:
+    target = placeholder or st
+    with target.container():
+        with st.expander("Agent timeline", expanded=expanded or processing):
+            if not events:
+                st.caption("Waiting for agent events…")
+                return
+            for event in events[-12:]:
+                status = event.get("status", "in_progress")
                 marker = {
                     "completed": "✅",
-                    "in_progress": "🔄",
-                    "pending": "⬜",
-                }.get(todo.get("status", "pending"), "⬜")
-                st.markdown(f"{marker} {todo.get('content', '')}")
-
-        tool_column, retrieval_column = st.columns(2)
-        tool_column.caption("Active tool")
-        tool_column.markdown(f"**`{panel.tool_name}`**")
-        retrieval_column.caption("Retrieval mode")
-        retrieval_column.markdown(f"**{panel.retrieval_mode}**")
-        candidate_column, evidence_column = st.columns(2)
-        candidate_column.metric("Candidates", panel.candidate_count)
-        evidence_column.metric("Selected evidence", panel.selected_evidence_count)
-        st.caption(f"Memory: **{panel.memory_status}** · Validation: **{panel.validation_status}**")
-        if panel.retrieval_filters:
-            filters = " · ".join(
-                f"{key.replace('_', ' ')}: `{value}`"
-                for key, value in panel.retrieval_filters.items()
-            )
-            st.caption(f"Retrieval filters · {filters}")
-
-        st.markdown("##### Timeline")
-        for event in events[-12:]:
-            status = event.get("status", "in_progress")
-            marker = {
-                "completed": "✅",
-                "failed": "❌",
-                "denied": "⛔",
-                "degraded": "⚠️",
-                "started": "▶️",
-            }.get(status, "⏳")
-            label = event.get("event_type", "activity").replace("_", " ").title()
-            node = event.get("node")
-            suffix = f" · `{node}`" if node else ""
-            st.markdown(f"{marker} **{label}**{suffix}  \n{event.get('message', '')}")
+                    "failed": "❌",
+                    "denied": "⛔",
+                    "degraded": "⚠️",
+                    "started": "▶️",
+                }.get(status, "⏳")
+                label = event.get("event_type", "activity").replace("_", " ").title()
+                node = event.get("node")
+                suffix = f" · `{node}`" if node else ""
+                st.markdown(f"{marker} **{label}**{suffix}  \n{event.get('message', '')}")
 
 
-def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any) -> dict[str, Any]:
+def render_activity_summary(
+    events: list[dict[str, Any]],
+    placeholder: Any,
+    *,
+    processing: bool = False,
+) -> None:
+    if not events:
+        with placeholder.container():
+            if processing:
+                st.info("Processing your question — live agent status will appear here.")
+            else:
+                st.info("Agent status will appear here when you ask a question.")
+        return
+
+    panel = project_activity_panel(events)
+    with placeholder.container():
+        header_left, header_right = st.columns([3, 1])
+        with header_left:
+            st.markdown("##### Live agent run")
+        with header_right:
+            if processing:
+                st.markdown(
+                    '<p style="text-align:right;margin:0.2rem 0 0;font-size:0.8rem;'
+                    'color:#2563eb;font-weight:600;">● Streaming</p>',
+                    unsafe_allow_html=True,
+                )
+
+        if panel.degraded:
+            st.warning("This request is operating in partial or degraded mode.")
+
+        with st.container(border=True):
+            agent_column, node_column = st.columns(2)
+            agent_column.caption("Current agent")
+            agent_column.markdown(f"**{panel.current_agent.replace('_', ' ').title()}**")
+            node_column.caption("Graph node")
+            node_column.markdown(f"**`{panel.current_node}`**")
+            st.markdown(panel.plan_summary)
+
+        if panel.research_todos:
+            with st.container(border=True):
+                st.markdown("**Research tasks**")
+                for todo in panel.research_todos:
+                    marker = {
+                        "completed": "✅",
+                        "in_progress": "🔄",
+                        "pending": "⬜",
+                    }.get(todo.get("status", "pending"), "⬜")
+                    st.markdown(f"{marker} {todo.get('content', '')}")
+
+        with st.container(border=True):
+            tool_column, retrieval_column = st.columns(2)
+            tool_column.caption("Active tool")
+            tool_column.markdown(f"**`{panel.tool_name}`**")
+            retrieval_column.caption("Retrieval mode")
+            retrieval_column.markdown(f"**{panel.retrieval_mode}**")
+            candidate_column, evidence_column = st.columns(2)
+            candidate_column.metric("Candidates", panel.candidate_count)
+            evidence_column.metric("Selected evidence", panel.selected_evidence_count)
+            if panel.retrieval_filters:
+                filters = " · ".join(
+                    f"{key.replace('_', ' ')}: `{value}`"
+                    for key, value in panel.retrieval_filters.items()
+                )
+                st.caption(f"Filters · {filters}")
+
+        st.markdown(
+            f"{_status_badge('Memory', panel.memory_status)} "
+            f"{_status_badge('Validation', panel.validation_status)}",
+            unsafe_allow_html=True,
+        )
+
+        details = [f"Request `{panel.request_id[:8]}…`" if panel.request_id else ""]
+        if panel.langsmith_run_id:
+            details.append(f"LangSmith `{panel.langsmith_run_id[:8]}…`")
+        st.caption(" · ".join(item for item in details if item))
+
+
+def render_generating_indicator(placeholder: Any) -> None:
+    placeholder.markdown(
+        """
+        <p class="generating-indicator">
+          <span class="generating-dot"></span>
+          Generating response…
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def stream_turn(
+    message: str,
+    answer_placeholder: Any,
+    summary_placeholder: Any,
+    timeline_placeholder: Any,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"message": message}
     if st.session_state.conversation_id:
         payload["conversation_id"] = st.session_state.conversation_id
 
     answer = ""
+    answer_is_provisional = False
     final_response: dict[str, Any] = {}
+    render_generating_indicator(answer_placeholder)
+    render_activity_timeline([], timeline_placeholder, expanded=True, processing=True)
     with (
         httpx.Client(timeout=httpx.Timeout(130, connect=5)) as client,
         client.stream(
@@ -113,14 +198,31 @@ def stream_turn(message: str, answer_placeholder: Any, activity_placeholder: Any
         for event_name, event in iter_sse(response):
             if event_name == "activity":
                 st.session_state.activities.append(event)
-                render_activity(st.session_state.activities, activity_placeholder)
+                render_activity_summary(
+                    st.session_state.activities,
+                    summary_placeholder,
+                    processing=True,
+                )
+                render_activity_timeline(
+                    st.session_state.activities,
+                    timeline_placeholder,
+                    expanded=True,
+                    processing=True,
+                )
             elif event_name == "answer_delta":
                 answer += event["text"]
-                answer_placeholder.markdown(answer + "▌")
+                answer_is_provisional = bool(event.get("provisional", False))
                 st.session_state.conversation_id = event["conversation_id"]
+                draft_note = (
+                    "\n\n> Draft answer — validating before the final response."
+                    if answer_is_provisional
+                    else ""
+                )
+                answer_placeholder.markdown(f"{answer}{draft_note} ▌")
             elif event_name == "final":
                 final_response = event
                 answer = event["answer"]
+                answer_is_provisional = False
                 st.session_state.conversation_id = event["conversation_id"]
                 if event.get("warnings"):
                     warning = " · ".join(event["warnings"])
@@ -308,33 +410,6 @@ def render_approval_center() -> None:
 
 
 st.set_page_config(page_title="Commercial Bank AI Assistant", page_icon="🏦", layout="wide")
-st.markdown(
-    """
-    <style>
-      .stApp { background: var(--background-color); }
-      [data-testid="stHeader"] { background: transparent; }
-      [data-testid="stSidebar"] { border-right: 1px solid rgba(128, 128, 128, 0.22); }
-      [data-testid="stMetric"] {
-        background: var(--secondary-background-color);
-        border: 1px solid rgba(128, 128, 128, 0.22);
-        border-radius: 12px;
-        padding: 0.7rem;
-      }
-      .stChatMessage {
-        background: var(--secondary-background-color);
-        border: 1px solid rgba(128, 128, 128, 0.22);
-        border-radius: 14px;
-      }
-      div[data-testid="stVerticalBlockBorderWrapper"] {
-        background: var(--secondary-background-color);
-        border-radius: 14px;
-      }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-st.title("Commercial Bank AI Assistant")
-st.caption("Grounded enterprise intelligence · human-controlled actions · cited evidence")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -346,6 +421,74 @@ if "access_token" not in st.session_state:
     st.session_state.access_token = None
 if "identity" not in st.session_state:
     st.session_state.identity = None
+
+st.markdown(
+    """
+    <style>
+      .stApp { background: var(--background-color); }
+      [data-testid="stHeader"] { background: transparent; }
+      [data-testid="stSidebar"] {
+        border-right: 1px solid rgba(128, 128, 128, 0.22);
+        background: var(--secondary-background-color);
+      }
+      [data-testid="stMetric"] {
+        background: var(--background-color);
+        border: 1px solid rgba(128, 128, 128, 0.18);
+        border-radius: 10px;
+        padding: 0.55rem 0.7rem;
+      }
+      .stChatMessage {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128, 128, 128, 0.18);
+        border-radius: 14px;
+        padding: 0.35rem 0.15rem;
+      }
+      div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: var(--secondary-background-color);
+        border-radius: 12px;
+        border-color: rgba(128, 128, 128, 0.18) !important;
+      }
+      [data-testid="stTabs"] button {
+        font-weight: 600;
+      }
+      [data-testid="stChatInput"] textarea {
+        border-radius: 12px !important;
+      }
+      .block-container {
+        padding-top: 1.5rem;
+        max-width: 1180px;
+      }
+      .generating-indicator {
+        color: #64748b;
+        font-size: 0.95rem;
+        margin: 0.2rem 0 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+      }
+      .generating-dot {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 999px;
+        background: #2563eb;
+        display: inline-block;
+        animation: generating-pulse 1.1s ease-in-out infinite;
+      }
+      @keyframes generating-pulse {
+        0%, 100% { opacity: 0.35; transform: scale(0.85); }
+        50% { opacity: 1; transform: scale(1); }
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+header_left, header_right = st.columns([4, 1])
+with header_left:
+    st.title("Commercial Bank AI Assistant")
+    st.caption("Grounded enterprise intelligence · human-controlled actions · cited evidence")
+with header_right:
+    turn_count = sum(1 for message in st.session_state.messages if message["role"] == "user")
+    st.metric("Turns", turn_count)
 
 if (
     st.session_state.access_token
@@ -377,12 +520,29 @@ if not st.session_state.access_token:
 
 with st.sidebar:
     identity = st.session_state.identity
-    st.write(f"Signed in as **{identity['display_name']}**")
-    st.caption(f"Role: {identity['role'].title()}")
-    st.caption(f"Conversation: {st.session_state.conversation_id or 'New conversation'}")
+    st.markdown("### Session")
+    st.write(f"**{identity['display_name']}**")
+    st.caption(f"Role · {identity['role'].title()}")
+    conversation_label = (
+        f"`{st.session_state.conversation_id[:8]}…`"
+        if st.session_state.conversation_id
+        else "New conversation"
+    )
+    st.caption(f"Conversation · {conversation_label}")
+    st.divider()
+    if st.button("Clear session", use_container_width=True):
+        st.session_state.messages = []
+        st.session_state.activities = []
+        st.session_state.conversation_id = None
+        st.rerun()
     if st.button("Sign out", use_container_width=True):
         st.session_state.clear()
         st.rerun()
+
+prompt = st.chat_input("Ask a Commercial Bank knowledge question")
+
+if prompt:
+    st.session_state.activities = []
 
 chat_column, activity_column = st.columns([2, 1], gap="large")
 
@@ -390,35 +550,56 @@ with activity_column:
     is_administrator = st.session_state.identity["role"] == "administrator"
     tabs = st.tabs(["Agent activity", "Approvals"] if is_administrator else ["Agent activity"])
     with tabs[0]:
-        activity_placeholder = st.empty()
-        render_activity(st.session_state.activities, activity_placeholder)
-        if st.button("Clear session", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.activities = []
-            st.session_state.conversation_id = None
-            st.rerun()
+        summary_placeholder = st.empty()
+        render_activity_summary(
+            st.session_state.activities,
+            summary_placeholder,
+            processing=bool(prompt),
+        )
     if is_administrator:
         with tabs[1]:
             render_approval_center()
 
 with chat_column:
-    for chat_message in st.session_state.messages:
+    if not st.session_state.messages:
+        st.info(
+            "Ask about policies, architecture, incidents, or runbooks. "
+            "Each answer includes cited evidence and an agent timeline below the response."
+        )
+
+    for index, chat_message in enumerate(st.session_state.messages):
         with st.chat_message(chat_message["role"]):
             st.markdown(chat_message["content"])
             render_citations(chat_message.get("citations", []))
+            if chat_message["role"] == "assistant" and chat_message.get("activities"):
+                render_activity_timeline(
+                    chat_message["activities"],
+                    expanded=index == len(st.session_state.messages) - 1,
+                )
 
-    prompt = st.chat_input("Ask a Commercial Bank knowledge question")
     if prompt:
-        st.session_state.activities = []
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
             answer_placeholder = st.empty()
+            citations_placeholder = st.empty()
+            timeline_placeholder = st.empty()
             try:
-                final_response = stream_turn(prompt, answer_placeholder, activity_placeholder)
+                with st.spinner("Generating response…"):
+                    final_response = stream_turn(
+                        prompt,
+                        answer_placeholder,
+                        summary_placeholder,
+                        timeline_placeholder,
+                    )
                 answer = final_response["answer"]
-                render_citations(final_response.get("citations", []))
+                if not answer.strip():
+                    answer_placeholder.warning("The assistant returned an empty response.")
+                with citations_placeholder.container():
+                    render_citations(final_response.get("citations", []))
+                render_activity_summary(st.session_state.activities, summary_placeholder)
+                render_activity_timeline(st.session_state.activities, timeline_placeholder)
             except (httpx.HTTPError, RuntimeError, json.JSONDecodeError) as exc:
                 answer = f"The assistant is unavailable: {exc}"
                 final_response = {"citations": []}
@@ -428,5 +609,6 @@ with chat_column:
                     "role": "assistant",
                     "content": answer,
                     "citations": final_response.get("citations", []),
+                    "activities": list(st.session_state.activities),
                 }
             )

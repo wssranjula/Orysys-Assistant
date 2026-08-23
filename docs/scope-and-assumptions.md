@@ -77,8 +77,8 @@ loading, filesystem tool, external URL fetcher, or arbitrary write-capable enter
 
 ## Provider and deployment assumptions
 
-- OpenAI is the optional semantic-routing and synthesis provider; the local profile uses a
-  deterministic router without cloud credentials.
+- OpenAI is the chat provider for the root delegation agent and every specialist loop; a credential
+  is required to build the runtime.
 - Pinecone is the dense vector store; BM25 operates over the POC corpus/index representation.
 - PostgreSQL owns conversation checkpoints; Redis owns token-bucket state.
 - LangSmith is optional for trace inspection, with sensitive content redacted.

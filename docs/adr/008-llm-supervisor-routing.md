@@ -1,6 +1,6 @@
 # ADR 008: LLM supervisor routing
 
-- Status: Accepted
+- Status: Superseded by ADR 010
 - Date: 2026-08-22
 
 ## Context
@@ -18,9 +18,10 @@ existing code-controlled branches and the application generates the route's user
 The `out_of_scope` branch calls no tools and returns a fixed explanation of supported duties for
 unrelated, casual, creative, or otherwise unsupported requests.
 
-When no model credential is configured, the local Compose profile uses a deterministic router. Tests
-and offline contract checks may inject an `AgentRouter` implementation explicitly; dependency
-injection is not selected automatically by runtime configuration.
+Tests and offline contract checks may inject an `AgentRouter` implementation explicitly; dependency
+injection is not selected automatically by runtime configuration. The keyword-based fallback router
+used when no credential was configured has been removed by ADR 009, which makes every specialist
+model-driven and therefore leaves no route a keyword classifier could still serve.
 
 One capability-compatibility invariant is enforced after model classification: an `enterprise`
 choice is converted to `research` when the request explicitly names two or more document families.
@@ -34,3 +35,11 @@ The model-backed router handles semantic and contextual intent; the local fallba
 availability over semantic precision. Neither route can broaden permissions or invent graph
 branches. Supervisor calls and validated choices are traced, while hidden reasoning is neither
 requested nor exposed.
+
+## Superseded
+
+ADR 010 removes the supervisor entirely. Routing is now the root agent choosing a delegation tool,
+and the reported route is derived from the consultations that actually produced evidence rather than
+from a structured decision the model returns. The `enterprise`-to-`research` guard is retired with
+the classifier: the root can consult a second specialist when the first returns nothing, which covers
+the misroute this ADR patched without needing to recognise it in advance.

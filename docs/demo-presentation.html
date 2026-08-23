@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Commercial Bank AI Assistant — Demo</title>
+  <style>
+    :root {
+      --ink: #142033;
+      --muted: #5b6678;
+      --line: #d5dbe4;
+      --paper: #f6f4ef;
+      --card: #ffffff;
+      --navy: #1d3557;
+      --accent: #1b6b6b;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    .deck { height: 100%; }
+    .slide {
+      display: none;
+      height: 100%;
+      padding: 56px 80px 72px;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .slide.active { display: flex; }
+    .slide.tall { justify-content: flex-start; padding-top: 40px; }
+    .kicker {
+      font-size: 14px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-family: Georgia, serif;
+      font-size: 48px;
+      line-height: 1.1;
+      margin: 0 0 20px;
+      color: var(--navy);
+    }
+    h2 {
+      font-family: Georgia, serif;
+      font-size: 36px;
+      line-height: 1.2;
+      margin: 0 0 28px;
+      color: var(--navy);
+    }
+    p { font-size: 24px; line-height: 1.5; margin: 0 0 16px; max-width: 880px; }
+    .big { font-size: 28px; }
+    .muted { color: var(--muted); font-size: 20px; }
+    ul.simple {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      max-width: 820px;
+    }
+    ul.simple li {
+      font-size: 26px;
+      line-height: 1.5;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--line);
+      padding-left: 48px;
+      position: relative;
+    }
+    ul.simple li::before {
+      content: attr(data-n);
+      position: absolute;
+      left: 0;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .pipeline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+    .pipe-box {
+      background: var(--card);
+      border: 2px solid var(--line);
+      padding: 16px 20px;
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--navy);
+      text-align: center;
+      min-width: 110px;
+    }
+    .pipe-box.highlight {
+      background: var(--navy);
+      color: white;
+      border-color: var(--navy);
+    }
+    .pipe-arrow {
+      font-size: 24px;
+      color: var(--muted);
+    }
+    .demo-q {
+      background: var(--card);
+      border-left: 5px solid var(--accent);
+      padding: 20px 24px;
+      font-size: 22px;
+      font-style: italic;
+      margin: 16px 0;
+      max-width: 820px;
+    }
+    .demo-row {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 16px;
+      align-items: start;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--line);
+      max-width: 900px;
+    }
+    .demo-row .label {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .demo-row p { font-size: 22px; margin: 0; }
+    .roles-table {
+      width: 100%;
+      max-width: 960px;
+      border-collapse: collapse;
+      background: var(--card);
+      font-size: 17px;
+    }
+    .roles-table th, .roles-table td {
+      text-align: left;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .roles-table th {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .roles-table td:first-child {
+      font-weight: 700;
+      color: var(--navy);
+      width: 120px;
+    }
+    .yes { color: var(--accent); font-weight: 600; }
+    .no { color: var(--muted); }
+    .role-cards {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 16px;
+      max-width: 960px;
+      margin-top: 8px;
+    }
+    .role-card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 18px 20px;
+    }
+    .role-card h3 {
+      margin: 0 0 4px;
+      font-size: 22px;
+      color: var(--navy);
+    }
+    .role-card .login {
+      font-size: 14px;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .role-card ul {
+      margin: 0;
+      padding-left: 18px;
+      font-size: 16px;
+      line-height: 1.5;
+    }
+    .role-card li { margin-bottom: 6px; }
+    .footer {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+      font-size: 14px;
+      color: var(--muted);
+      background: var(--paper);
+      border-top: 1px solid var(--line);
+    }
+    .progress { height: 4px; background: var(--navy); position: fixed; top: 0; left: 0; }
+    .notes {
+      display: none;
+      margin-top: 24px;
+      font-size: 16px;
+      color: var(--muted);
+    }
+    body.show-notes .notes { display: block; }
+  </style>
+</head>
+<body>
+  <div class="progress" id="progress"></div>
+  <div class="deck" id="deck">
+
+    <section class="slide active">
+      <div class="kicker">Demo</div>
+      <h1>Commercial Bank<br>AI Assistant</h1>
+      <p class="big">A chat assistant that answers from internal documents — with sources, role-based access, and a visible activity panel so you can see what it is doing.</p>
+      
+    </section>
+
+    <section class="slide">
+      <div class="kicker">Problem</div>
+      <h2>Employees have documents.<br>They need trustworthy answers.</h2>
+      <ul class="simple">
+        <li data-n="1">Knowledge is spread across policies, runbooks, incidents, and specs</li>
+        <li data-n="2">A generic chatbot can sound confident but cite nothing</li>
+        <li data-n="3">Not everyone should see the same information</li>
+      </ul>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">Solution</div>
+      <h2>One chat. Four specialist helpers. Code keeps it safe.</h2>
+      <p>The user asks a question. A <strong>root agent</strong> picks the right helper. Each helper can search documents or call approved tools. The final answer includes <strong>citations</strong> you can check.</p>
+      <div class="pipeline" style="margin-top:32px">
+        <div class="pipe-box">You</div>
+        <span class="pipe-arrow">→</span>
+        <div class="pipe-box">Chat UI</div>
+        <span class="pipe-arrow">→</span>
+        <div class="pipe-box highlight">Root agent</div>
+        <span class="pipe-arrow">→</span>
+        <div class="pipe-box">Helper</div>
+        <span class="pipe-arrow">→</span>
+        <div class="pipe-box">Answer + sources</div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">How it works</div>
+      <h2>Five steps for every question</h2>
+      <ul class="simple">
+        <li data-n="1"><strong>Check who you are</strong> — login, rate limit, block bad input</li>
+        <li data-n="2"><strong>Load memory</strong> — remember this conversation</li>
+        <li data-n="3"><strong>Pick a helper</strong> — search, research, count, or look up a record</li>
+        <li data-n="4"><strong>Validate the answer</strong> — every citation must match real evidence</li>
+        <li data-n="5"><strong>Save &amp; show</strong> — stream the reply + activity panel + trace ID</li>
+      </ul>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">Helpers</div>
+      <h2>Four specialists</h2>
+      <ul class="simple">
+        <li data-n="📄"><strong>Knowledge</strong> — quick lookup in documents (e.g. “What is the remote-work policy?”)</li>
+        <li data-n="🔍"><strong>Research</strong> — deep search across many docs (e.g. “Summarize last year’s outages”)</li>
+        <li data-n="📊"><strong>Analysis</strong> — counts and trends (e.g. “How many payment incidents?”)</li>
+        <li data-n="🏢"><strong>Enterprise</strong> — employee, service, and incident records (e.g. “Who owns this service?”)</li>
+      </ul>
+    </section>
+
+    <section class="slide tall">
+      <div class="kicker">Roles</div>
+      <h2 style="margin-bottom:16px">Three users. Different access.</h2>
+      <p class="muted" style="margin-bottom:20px">Permissions are enforced in code — the agent cannot override them.</p>
+      <div class="role-cards">
+        <div class="role-card">
+          <h3>Viewer</h3>
+          <div class="login">viewer@commercialbank.test</div>
+          <ul>
+            <li>Chat + search internal documents</li>
+            <li>Own department’s confidential docs</li>
+            <li><span class="no">No</span> analytics, enterprise tools, or restricted docs</li>
+          </ul>
+        </div>
+        <div class="role-card">
+          <h3>Analyst</h3>
+          <div class="login">analyst@commercialbank.test</div>
+          <ul>
+            <li>Everything Viewer can do</li>
+            <li>Counts &amp; trends (structured analysis)</li>
+            <li>Employee, service &amp; incident lookups</li>
+            <li><span class="no">No</span> restricted docs or admin writes</li>
+          </ul>
+        </div>
+        <div class="role-card">
+          <h3>Administrator</h3>
+          <div class="login">admin@commercialbank.test</div>
+          <ul>
+            <li>All documents including restricted</li>
+            <li>All tools and enterprise lookups</li>
+            <li>Request incident changes (needs 2nd admin approval)</li>
+          </ul>
+        </div>
+      </div>
+      <table class="roles-table" style="margin-top:20px">
+        <tr>
+          <th></th>
+          <th>Viewer</th>
+          <th>Analyst</th>
+          <th>Admin</th>
+        </tr>
+        <tr>
+          <td>Chat &amp; search</td>
+          <td class="yes">Yes</td>
+          <td class="yes">Yes</td>
+          <td class="yes">Yes</td>
+        </tr>
+        <tr>
+          <td>Analysis &amp; MCP tools</td>
+          <td class="no">No</td>
+          <td class="yes">Yes</td>
+          <td class="yes">Yes</td>
+        </tr>
+        <tr>
+          <td>Restricted documents</td>
+          <td class="no">No</td>
+          <td class="no">No</td>
+          <td class="yes">Yes</td>
+        </tr>
+        <tr>
+          <td>Approve incident change</td>
+          <td class="no">No</td>
+          <td class="no">No</td>
+          <td class="yes">Yes*</td>
+        </tr>
+      </table>
+      <p class="muted" style="margin-top:12px;font-size:16px">*Second administrator must approve — self-approval is blocked (approver@commercialbank.test)</p>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">Safety</div>
+      <h2>Built in, not promised in a prompt</h2>
+      <ul class="simple">
+        <li data-n="✓"><strong>Roles</strong> — see previous slide; same question, different outcome</li>
+        <li data-n="✓"><strong>Gateway</strong> — every tool call is checked before it runs</li>
+        <li data-n="✓"><strong>Citations</strong> — the system rejects answers with fake sources</li>
+        <li data-n="✓"><strong>Transparency</strong> — activity panel shows tools and retrieval, not hidden reasoning</li>
+      </ul>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">Live demo</div>
+      <h2>What to look at on screen</h2>
+      <ul class="simple">
+        <li data-n="→"><strong>Left</strong> — chat with streaming answer and citation markers</li>
+        <li data-n="→"><strong>Right</strong> — activity panel: which helper, which tool, how many docs found</li>
+        <li data-n="→"><strong>Bottom</strong> — evidence drawer: document title and source path</li>
+      </ul>
+      <p class="muted" style="margin-top:24px">Keep the activity panel open for the whole demo.</p>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">Demo script</div>
+      <h2>Questions to ask live</h2>
+
+      <div class="demo-row">
+        <div class="label">Viewer</div>
+        <p>“What does Commercial Bank's remote-work policy allow?”</p>
+      </div>
+      <div class="demo-row">
+        <div class="label">Viewer · same chat</div>
+        <p>“Does that apply during probation?” <span class="muted">(shows memory)</span></p>
+      </div>
+      <div class="demo-row">
+        <div class="label">Analyst</div>
+        <p>“Summarize payment-failure outages from the last year.” <span class="muted">(shows research)</span></p>
+      </div>
+      <div class="demo-row">
+        <div class="label">Analyst</div>
+        <p>“Who owns the Payments Gateway service?” <span class="muted">(shows enterprise lookup)</span></p>
+      </div>
+      <div class="demo-row">
+        <div class="label">Viewer</div>
+        <p>“Find Maya Fernando in the employee directory.” <span class="muted">(should be denied)</span></p>
+      </div>
+      <div class="demo-row">
+        <div class="label">Admin</div>
+        <p>Same restricted document question as Viewer — <span class="muted">(should succeed with citations)</span></p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">Wrap-up</div>
+      <h2>What this proves</h2>
+      <ul class="simple">
+        <li data-n="✓">Real multi-agent system — not just “LLM + vector DB”</li>
+        <li data-n="✓">Hybrid search, tools, memory, and guardrails working together</li>
+        <li data-n="✓">Every answer traceable in LangSmith with the same request ID</li>
+        <li data-n="✓">Automated tests: 10 golden scenarios, 100% citation and permission checks</li>
+      </ul>
+    </section>
+
+  </div>
+
+  <div class="footer">
+    <span>Commercial Bank AI Assistant</span>
+    <span>← → to navigate · F fullscreen · <span id="count">1 / 1</span></span>
+  </div>
+
+  <script>
+    const slides = [...document.querySelectorAll(".slide")];
+    const count = document.getElementById("count");
+    const progress = document.getElementById("progress");
+    let i = 0;
+
+    function show(next) {
+      i = Math.max(0, Math.min(slides.length - 1, next));
+      slides.forEach((slide, idx) => slide.classList.toggle("active", idx === i));
+      count.textContent = (i + 1) + " / " + slides.length;
+      progress.style.width = ((i + 1) / slides.length * 100) + "%";
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (["ArrowRight", "ArrowDown", "PageDown", " "].includes(event.key)) {
+        event.preventDefault();
+        show(i + 1);
+      } else if (["ArrowLeft", "ArrowUp", "PageUp", "Backspace"].includes(event.key)) {
+        event.preventDefault();
+        show(i - 1);
+      } else if (event.key === "Home") show(0);
+      else if (event.key === "End") show(slides.length - 1);
+      else if (event.key === "f" || event.key === "F") {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else document.exitFullscreen();
+      }
+    });
+
+    show(0);
+  </script>
+</body>
+</html>

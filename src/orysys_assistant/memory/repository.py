@@ -36,6 +36,36 @@ class ConversationRepository(Protocol):
     async def close(self) -> None: ...
 
 
+def _conversation_summary(messages: list[StoredMessage], max_characters: int) -> str:
+    """Build a bounded transcript that keeps whole recent turns instead of mid-sentence tails."""
+
+    lines = [f"{message.role.title()}: {message.content}" for message in messages]
+    if not lines:
+        return ""
+    transcript = "\n".join(lines)
+    if len(transcript) <= max_characters:
+        return transcript
+
+    kept: list[str] = []
+    for line in reversed(lines):
+        candidate = "\n".join([line, *kept]) if kept else line
+        if len(candidate) + 64 > max_characters and kept:
+            break
+        kept.insert(0, line)
+
+    omitted = len(lines) - len(kept)
+    body = "\n".join(kept)
+    if omitted:
+        prefix = f"[{omitted} earlier turn(s) omitted from this summary]\n"
+        while len(prefix) + len(body) > max_characters and len(kept) > 1:
+            omitted += 1
+            kept.pop(0)
+            body = "\n".join(kept)
+            prefix = f"[{omitted} earlier turn(s) omitted from this summary]\n"
+        return f"{prefix}{body}"
+    return body
+
+
 def _updated_record(
     record: ConversationRecord,
     user_message: str,
@@ -49,8 +79,7 @@ def _updated_record(
         StoredMessage(role="user", content=user_message),
         StoredMessage(role="assistant", content=assistant_message),
     ][-max_messages:]
-    transcript = "\n".join(f"{message.role.title()}: {message.content}" for message in messages)
-    summary = transcript[-max_summary_characters:]
+    summary = _conversation_summary(messages, max_summary_characters)
     return record.model_copy(
         update={
             "messages": messages,

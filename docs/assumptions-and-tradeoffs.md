@@ -14,21 +14,27 @@
 
 ### Model routing with deterministic enforcement
 
-The API uses a model-backed LangChain supervisor with retry-capable tool-structured output for
-semantic routing. The supervisor may choose only one declared route; LangGraph edges, tool surfaces,
-identity, authorization, scope, budgets, citation resolution, and validation remain deterministic
-code. Without an OpenAI credential, the local Compose profile uses a conservative deterministic
-router. With a credential, the model-backed supervisor provides semantic routing. Tests may inject
-router doubles for focused verification.
+There is no classifier. The root is an agent whose only tools are the four specialists, so routing is
+its choice of delegation tool and can be revised after seeing a result. Tool surfaces, identity,
+authorization, scope, budgets, citation resolution, and validation remain deterministic code, and the
+route and status the turn reports are rebuilt from the consultations that actually produced evidence
+rather than from anything the model asserts. An OpenAI credential is required, because the root and
+every specialist below it is a model-driven loop. Tests inject a scripted chat model to make the
+model's turns deterministic while still exercising the real loop, middleware, and gateway.
 
 ### Simplified RLM
 
-The research specialist implements Recursive Language Model concepts as an explicit LangGraph:
-plan, bounded parallel workers, targeted retrieval, reduction, coverage checking, limited follow-up
-recursion, and final aggregation. A model generates bounded research todos through the harness
-`write_todos` middleware, while code still owns task limits and execution. Analysis operations are
-code-generated rather than arbitrary model-generated Python. This gives the evaluator adaptive
-planning, recursion, and state management without introducing a code-execution surface.
+The research specialist implements Recursive Language Model concepts on the Deep Agents harness: it
+decomposes the objective with `write_todos`, issues parallel `knowledge_search` calls, offloads long
+passages to an in-state virtual filesystem, and re-plans against what it found. Recursion is the
+agent revisiting its own plan rather than a fixed-depth follow-up loop.
+
+Code still owns the parts that must not vary: tool visibility, RBAC, tool and model call ceilings
+enforced as middleware, the overall deadline, and the reconstruction of evidence and citations from
+retrievals that actually executed. A finding citing an evidence identifier the model invented is
+dropped before it can become a citation. Analysis operations remain a fixed set of audited
+aggregations rather than model-generated Python, so adaptive planning arrives without a
+code-execution surface.
 
 ### Offline retrieval versus Pinecone
 

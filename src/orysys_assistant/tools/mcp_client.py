@@ -9,6 +9,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from orysys_assistant.domain.errors import InvalidRequestError
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.tools.enterprise_data import (
     EMPLOYEES,
     INCIDENTS,
@@ -49,12 +50,22 @@ class MCPClientAdapter:
         self._url = url
         self._timeout = timedelta(seconds=timeout_seconds)
 
+    async def call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._traced_call(
+            tool_name,
+            arguments,
+            langsmith_extra={
+                "name": tool_name,
+                "metadata": {"tool_name": tool_name, "transport": "streamable_http"},
+                "tags": app_span_tags("enterprise", tool_name),
+            },
+        )
+
     @traceable(
-        name="enterprise-mcp-call",
         run_type="tool",
         metadata={"transport": "streamable_http", "read_only": True},
     )
-    async def call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _traced_call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         async with (
             streamable_http_client(self._url) as (read_stream, write_stream, _),
             ClientSession(

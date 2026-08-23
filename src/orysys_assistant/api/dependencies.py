@@ -16,6 +16,7 @@ from orysys_assistant.domain.errors import (
     RateLimitUnavailableError,
 )
 from orysys_assistant.guardrails.output import OutputValidator
+from orysys_assistant.memory.feedback_repository import FeedbackRepository
 from orysys_assistant.memory.repository import ConversationRepository
 from orysys_assistant.memory.runtime import MemoryRuntime
 from orysys_assistant.observability.logging import get_logger
@@ -83,6 +84,13 @@ async def get_conversation_repository(request: Request) -> ConversationRepositor
 ConversationRepositoryDependency = Annotated[
     ConversationRepository, Depends(get_conversation_repository)
 ]
+
+
+def get_feedback_repository(request: Request) -> FeedbackRepository:
+    return cast(FeedbackRepository, request.app.state.feedback_repository)
+
+
+FeedbackRepositoryDependency = Annotated[FeedbackRepository, Depends(get_feedback_repository)]
 
 
 def get_approval_service(request: Request) -> ApprovalService:
