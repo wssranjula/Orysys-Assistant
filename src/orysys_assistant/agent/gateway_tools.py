@@ -15,7 +15,6 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain.agents.middleware import ModelCallLimitMiddleware, ToolCallLimitMiddleware
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
@@ -123,22 +122,6 @@ def final_text(state: Any) -> str:
             if text:
                 return text
     return ""
-
-
-def budget_middleware(*, max_tool_calls: int, max_model_calls: int) -> list[Any]:
-    """Execution budgets for one specialist run, enforced by the harness.
-
-    A budget stated in a prompt is a request; a budget stated here is a fact. Tool and
-    model call ceilings hold no matter what the model decides to do next.
-
-    Typed as ``list[Any]`` because the harness middleware generics are invariant in the
-    agent state parameter, which leaves no precise element type these classes satisfy.
-    """
-
-    return [
-        ToolCallLimitMiddleware(run_limit=max_tool_calls, exit_behavior="continue"),
-        ModelCallLimitMiddleware(run_limit=max_model_calls, exit_behavior="end"),
-    ]
 
 
 def build_gateway_tools(toolbox: ScopedToolbox) -> list[StructuredTool]:

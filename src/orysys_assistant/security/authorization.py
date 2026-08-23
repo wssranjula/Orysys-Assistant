@@ -6,6 +6,7 @@ from langsmith import traceable
 
 from orysys_assistant.domain.errors import AuthorizationError
 from orysys_assistant.domain.models import Role
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.observability.logging import get_logger
 from orysys_assistant.security.models import UserIdentity
 
@@ -39,7 +40,7 @@ class AuthorizationPolicy:
     def is_allowed(self, role: Role, capability: Capability) -> bool:
         return capability in ROLE_CAPABILITIES[role]
 
-    @traceable(name="authorization-decision", run_type="tool")
+    @traceable(name="authorization-decision", run_type="tool", tags=app_span_tags("auth"))
     def require(self, identity: UserIdentity, capability: Capability) -> None:
         allowed = self.is_allowed(identity.role, capability)
         logger.info(

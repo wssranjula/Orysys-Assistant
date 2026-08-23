@@ -18,13 +18,14 @@ from orysys_assistant.agent.gateway_tools import (
     SpecialistContext,
     SpecialistOutcome,
     TransitionSink,
-    budget_middleware,
     build_gateway_tools,
     final_text,
 )
+from orysys_assistant.agent.middleware_limits import budget_middleware
 from orysys_assistant.agent.models import AnalysisResult
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.guardrails.content import unwrap_evidence
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.retrieval.models import Evidence
 
 KNOWLEDGE_SYSTEM_PROMPT = """You are the knowledge specialist for Commercial Bank's internal
@@ -98,6 +99,7 @@ class KnowledgeSubagent:
         name="delegate-knowledge-subagent",
         run_type="chain",
         metadata={"agent": "knowledge_subagent", "delegated": True},
+        tags=app_span_tags("delegate", "knowledge"),
     )
     async def run(
         self,
@@ -157,6 +159,7 @@ class AnalysisSubagent:
         name="delegate-analysis-subagent",
         run_type="chain",
         metadata={"agent": "analysis_subagent", "delegated": True},
+        tags=app_span_tags("delegate", "analysis"),
     )
     async def run(
         self,
@@ -220,6 +223,7 @@ class EnterpriseToolSubagent:
         name="delegate-enterprise-tool-subagent",
         run_type="chain",
         metadata={"agent": "enterprise_tool_subagent", "delegated": True},
+        tags=app_span_tags("delegate", "enterprise"),
     )
     async def run(
         self,

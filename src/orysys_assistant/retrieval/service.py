@@ -7,6 +7,7 @@ from typing import Any, cast
 from langsmith import traceable
 
 from orysys_assistant.domain.errors import RetrievalUnavailableError
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.retrieval.embeddings import EmbeddingProvider
 from orysys_assistant.retrieval.models import Evidence, SearchFilters, SearchMatch
 from orysys_assistant.retrieval.reranking import Reranker
@@ -50,7 +51,11 @@ class RetrievalService:
         self._minimum_sparse_score = minimum_sparse_score
         self._reranker = reranker
 
-    @traceable(name="hybrid-knowledge-retrieval", run_type="retriever")
+    @traceable(
+        name="hybrid-knowledge-retrieval",
+        run_type="retriever",
+        tags=app_span_tags("retrieval"),
+    )
     async def search(
         self,
         query: str,

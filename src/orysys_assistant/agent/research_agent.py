@@ -17,11 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from deepagents import create_deep_agent
-from langchain.agents.middleware import (
-    SummarizationMiddleware,
-    TodoListMiddleware,
-    wrap_tool_call,
-)
+from langchain.agents.middleware import SummarizationMiddleware, wrap_tool_call
 from langgraph.config import get_stream_writer
 from langgraph.runtime import get_runtime
 from langsmith import traceable
@@ -31,13 +27,14 @@ from orysys_assistant.agent.gateway_tools import (
     SpecialistContext,
     SpecialistOutcome,
     TransitionSink,
-    budget_middleware,
     build_gateway_tools,
     final_text,
 )
+from orysys_assistant.agent.middleware_limits import QuietTodoListMiddleware, budget_middleware
 from orysys_assistant.agent.models import AgentTransition
 from orysys_assistant.agent.toolbox import ScopedToolbox
 from orysys_assistant.config import Settings
+from orysys_assistant.observability.agent_tracing import app_span_tags
 
 RESEARCH_SYSTEM_PROMPT = """You are the research specialist for Commercial Bank's internal
 assistant. You investigate questions that no single document answers, working only from the
@@ -170,7 +167,7 @@ class ResearchSubagent:
             system_prompt=f"{RESEARCH_SYSTEM_PROMPT}\n\n{RESEARCH_RESPONSE_INSTRUCTION}",
             context_schema=SpecialistContext,
             middleware=[
-                TodoListMiddleware(),
+                QuietTodoListMiddleware(),
                 plan_activity_middleware(self.name, "planner"),
                 SummarizationMiddleware(
                     model=model, trigger=("tokens", limits.summarization_token_trigger)
@@ -188,6 +185,7 @@ class ResearchSubagent:
         name="delegate-research-subagent",
         run_type="chain",
         metadata={"agent": "research_subagent", "delegated": True},
+        tags=app_span_tags("delegate", "research"),
     )
     async def run(
         self,

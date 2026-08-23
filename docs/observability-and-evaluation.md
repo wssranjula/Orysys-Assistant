@@ -40,8 +40,19 @@ Structured JSON logs use the same request-scoped identifiers, allowing local cor
 LangSmith is disabled.
 
 LangGraph middleware spans (todo lists, call limits) also appear in LangSmith. Filter by
-`chat-request`, `delegate-*`, `hybrid-knowledge-retrieval`, or `output-validation` to focus
-on application-level spans.
+the `app-span` tag or run name to focus on application-level spans:
+
+- LangSmith filter: `has(tags, "app-span")`
+- CLI summary: `uv run python scripts/analyze_langsmith_runs.py <request_id>`
+
+When `LANGSMITH_QUIET_MIDDLEWARE_TRACES=true` (default), middleware spans omit bulky
+state payloads and the root orchestrator uses one consolidated delegation limiter instead
+of four separate middleware nodes.
+
+Tool invocations are labeled with their registered tool name in LangSmith (for example
+`knowledge_search`, `consult_research_specialist`, `get_incident`) rather than generic
+`tools` or `tool-gateway-execution` spans. Filter with `has(tags, "app-span")` or search
+by run name: `eq(name, "knowledge_search")`.
 
 ## Golden evaluation
 

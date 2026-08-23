@@ -23,6 +23,7 @@ from orysys_assistant.guardrails.input import InputGuard
 from orysys_assistant.guardrails.output import OutputValidator
 from orysys_assistant.memory.feedback_repository import InMemoryFeedbackRepository
 from orysys_assistant.memory.runtime import MemoryRuntime
+from orysys_assistant.observability.agent_tracing import configure_agent_tracing
 from orysys_assistant.observability.logging import configure_logging, get_logger
 from orysys_assistant.retrieval.runtime import AgentRuntimeManager
 from orysys_assistant.security.access_scope import AccessScopeService
@@ -44,6 +45,8 @@ def create_app(
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
     configure_logging(resolved_settings.log_level)
+    if resolved_settings.langsmith_enabled and resolved_settings.langsmith_quiet_middleware_traces:
+        configure_agent_tracing(quiet_middleware=True)
     logger = get_logger()
     authentication = AuthenticationService(resolved_settings)
     access_scope_service = AccessScopeService(resolved_settings)

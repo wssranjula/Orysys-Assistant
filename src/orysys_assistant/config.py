@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     langsmith_api_key: str | None = None
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     langsmith_project: str = "commercial-bank-assistant"
+    langsmith_quiet_middleware_traces: bool = True
     openai_api_key: str | None = None
     agent_model: str = "gpt-5-mini"
     embedding_provider: str = "openai"

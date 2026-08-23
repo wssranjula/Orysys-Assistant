@@ -7,6 +7,7 @@ from langsmith import traceable
 
 from orysys_assistant.agent.models import AgentExecutionResult, AgentRoute
 from orysys_assistant.domain.models import Citation, ResponseStatus
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.security.models import AccessScope
 
 _CITATION_MARKER = re.compile(r"\[([^\[\]\s]{1,20})\]")
@@ -43,6 +44,7 @@ class OutputValidator:
         name="output-validation",
         run_type="chain",
         metadata={"control": "citation_and_brand_validation", "phase": 7},
+        tags=app_span_tags("validation"),
     )
     def validate(
         self, result: AgentExecutionResult, access_scope: AccessScope

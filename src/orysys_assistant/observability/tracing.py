@@ -9,6 +9,7 @@ from langsmith.run_trees import RunTree
 
 from orysys_assistant.agent.models import AgentExecutionResult
 from orysys_assistant.guardrails.output import ValidationOutcome
+from orysys_assistant.observability.agent_tracing import APP_SPAN_TAG
 
 
 @lru_cache(maxsize=4)
@@ -48,7 +49,7 @@ def start_chat_request_trace(
                 "agent_name": agent_name,
             }
         },
-        tags=[role, f"request:{request_id}"],
+        tags=[APP_SPAN_TAG, role, f"request:{request_id}"],
     )
     run.post()
     return run

@@ -13,6 +13,7 @@ from orysys_assistant.domain.errors import (
     InvalidRequestError,
     ToolTimeoutError,
 )
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.observability.logging import get_logger
 from orysys_assistant.security.authorization import AuthorizationPolicy, Capability
 from orysys_assistant.security.models import TrustedRequestContext
@@ -131,9 +132,23 @@ class ToolGateway:
                 "role": context.identity.role.value,
                 "agent_name": "tool_gateway",
             },
-            tags=[tool_name, context.identity.role.value],
+            tags=app_span_tags(tool_name, context.identity.role.value),
         ):
-            result = await self._invoke(spec, validated, context)
+            result = await ToolGateway._invoke(
+                spec,
+                validated,
+                context,
+                langsmith_extra={
+                    "name": tool_name,
+                    "metadata": {
+                        "tool_name": tool_name,
+                        "role": context.identity.role.value,
+                        "agent_name": "tool_gateway",
+                        "control": "authorized_tool_gateway",
+                    },
+                    "tags": app_span_tags(tool_name, context.identity.role.value),
+                },
+            )
 
         result_size = len(json.dumps(result, default=str).encode("utf-8"))
         if result_size > spec.max_result_bytes:
@@ -150,7 +165,6 @@ class ToolGateway:
 
     @staticmethod
     @traceable(
-        name="tool-gateway-execution",
         run_type="tool",
         metadata={"control": "authorized_tool_gateway"},
     )

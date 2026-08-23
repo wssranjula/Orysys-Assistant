@@ -21,7 +21,6 @@ from typing import Any
 from uuid import uuid4
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import TodoListMiddleware, ToolCallLimitMiddleware
 from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.runtime import get_runtime
@@ -31,8 +30,12 @@ from pydantic import BaseModel, Field
 from orysys_assistant.agent.gateway_tools import (
     SpecialistOutcome,
     TransitionSink,
-    budget_middleware,
     final_text,
+)
+from orysys_assistant.agent.middleware_limits import (
+    DelegationOnceMiddleware,
+    QuietTodoListMiddleware,
+    budget_middleware,
 )
 from orysys_assistant.agent.models import (
     AgentExecutionResult,
@@ -48,6 +51,7 @@ from orysys_assistant.agent.subagents import (
     evidence_summary,
 )
 from orysys_assistant.domain.models import Citation, ResponseStatus
+from orysys_assistant.observability.agent_tracing import app_span_tags
 from orysys_assistant.retrieval.models import Evidence
 from orysys_assistant.security.models import TrustedRequestContext
 
@@ -248,17 +252,9 @@ class RootOrchestrator:
             system_prompt=ROOT_SYSTEM_PROMPT,
             context_schema=RootAgentContext,
             middleware=[
-                TodoListMiddleware(),
+                QuietTodoListMiddleware(),
                 plan_activity_middleware(self.name, "root_planner"),
-                # One consultation per specialist. The prompt asks the model not to
-                # re-ask a specialist that came back empty; this makes it so, and caps
-                # the number of specialists a single turn can spend at four.
-                *[
-                    ToolCallLimitMiddleware(
-                        tool_name=tool.name, run_limit=1, exit_behavior="continue"
-                    )
-                    for tool in tools
-                ],
+                DelegationOnceMiddleware([tool.name for tool in tools]),
                 *budget_middleware(max_tool_calls=max_tool_calls, max_model_calls=max_model_calls),
             ],
             checkpointer=checkpointer,
@@ -269,6 +265,7 @@ class RootOrchestrator:
         name="root-deep-agent-orchestration",
         run_type="chain",
         metadata={"agent": "root_deep_agent", "phase": 6},
+        tags=app_span_tags("root"),
     )
     async def run(
         self,

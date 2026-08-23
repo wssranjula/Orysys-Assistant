@@ -34,7 +34,10 @@ async def main() -> int:
             "POST",
             f"{API_BASE}/v1/chat/stream",
             headers={"Authorization": f"Bearer {token}"},
-            json={"message": "What does Commercial Bank's remote-work policy allow?", "conversation_id": str(uuid4())},
+            json={
+                "message": "What does Commercial Bank's remote-work policy allow?",
+                "conversation_id": str(uuid4()),
+            },
         ) as response:
             response.raise_for_status()
             event = ""
