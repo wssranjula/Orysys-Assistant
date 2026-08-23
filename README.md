@@ -1,13 +1,13 @@
 # Commercial Bank AI Assistant
 
 An enterprise AI-assistant proof of concept for evidence-grounded answers over internal
-knowledge. The target system combines a FastAPI/Streamlit interface, one controlled production
-LangGraph, a bounded research subgraph, hybrid Pinecone retrieval, role-aware tools,
-session memory, and LangSmith observability.
+knowledge. The target system combines a FastAPI/Streamlit interface, a root agent that can only act
+by delegating to four bounded specialists, hybrid Pinecone retrieval, role-aware tools, session
+memory, and LangSmith observability.
 
-> **Current status:** Phase 10 complete — model-backed or deterministic routing, bounded agent
-> workflows, reranking, explicit preferences, durable approval records, observability, and hardened
-> packaging are integrated.
+> **Current status:** Phase 10 complete — autonomous delegation, bounded agent workflows, reranking,
+> explicit preferences, durable approval records, observability, and hardened packaging are
+> integrated.
 
 ## Problem statement
 
@@ -133,15 +133,15 @@ Copy `.env.example` and keep `.env` untracked. The principal controls are:
 | `MEMORY_BACKEND` | `memory` locally; `postgres` in Compose | conversation, checkpoint, and preference storage |
 | `RATE_LIMIT_BACKEND` | `redis` | shared token-bucket adapter; use `memory` for local single-process dev |
 | `MCP_BACKEND` | `memory` locally; `http` in Compose | enterprise-tool transport |
-| `AGENT_MODEL` | `gpt-5-mini` | supervisor routing and optional answer synthesis model |
-| `AGENT_SYNTHESIS_ENABLED` | `true` | enable model-backed answer synthesis when a key is present |
+| `AGENT_MODEL` | `gpt-5-mini` | model behind the root agent and every specialist loop |
+| `ROOT_MAX_TOOL_CALLS` | `8` | delegations the root may spend in one turn |
 | `RETRIEVAL_RERANKING_ENABLED` | `true` | blend lexical reranking over hybrid candidates |
 | `LANGSMITH_TRACING` | `false` | enable trace export when a key is present |
 | `API_PORT`, `UI_PORT` | `8000`, `8501` | loopback Compose ports |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | overall request deadline |
 
-When `OPENAI_API_KEY` is unset, the local deterministic profile uses `DeterministicIntentRouter`;
-set the key to enable the model-backed supervisor and answer synthesis. Pinecone mode additionally
+`OPENAI_API_KEY` is required: every specialist is a model-driven tool-calling loop, so the runtime
+fails to build without it rather than falling back to a keyword classifier. Pinecone mode additionally
 requires `PINECONE_API_KEY`, index/host configuration, and a matching embedding dimension. Compose
 maps the four `AUTH_*_TOKEN` values to the demo bearer tokens used after login. All limits and
 adapter variables are listed in [.env.example](.env.example).
@@ -181,8 +181,8 @@ pending synthetic incident change.
 | Streaming API | `POST /v1/chat/stream` emits `activity`, `answer_delta`, and terminal `final` events | [contracts.md](docs/contracts.md) |
 | Security | Bearer auth, one authorization matrix, Tool Gateway, Redis rate limiting | [security.md](docs/security.md) |
 | Corpus and retrieval | 48 synthetic Markdown documents, hybrid dense + BM25, optional reranking | [retrieval.md](docs/retrieval.md) |
-| Agent orchestration | One LangGraph with model-backed or deterministic supervisor routing | [agents.md](docs/agents.md) |
-| Research workflow | Bounded plan → worker fan-out → reduce → coverage → follow-up | [research-graph.md](docs/research-graph.md) |
+| Agent orchestration | A root agent whose only tools are four autonomous, gateway-bounded specialists | [agents.md](docs/agents.md) |
+| Research workflow | Deep Agents planning, parallel retrieval, and evidence-driven re-planning | [research-agent.md](docs/research-agent.md) |
 | Memory and tools | PostgreSQL checkpoints, preferences API, analysis tool, six MCP reads | [memory-and-tools.md](docs/memory-and-tools.md) |
 | Guardrails | Evidence ledger, citation validation, retries, dense-only and partial degradation | [guardrails-and-degradation.md](docs/guardrails-and-degradation.md) |
 | Observability | Activity panel, trace correlation, golden evaluation runner | [observability-and-evaluation.md](docs/observability-and-evaluation.md) |
@@ -209,16 +209,20 @@ uv run python scripts/ingest_sample_documents.py --backend pinecone
 ### LangSmith tracing
 
 Set `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and optionally `LANGSMITH_PROJECT` in `.env`.
-Root routing, retrieval, and each delegation boundary are decorated as LangSmith runs. Tracing is
-disabled safely when no key/configuration is supplied.
+The root agent's loop, retrieval, and each delegation boundary are decorated as LangSmith runs.
+Tracing is disabled safely when no key/configuration is supplied.
 
 ## Agent and RLM design
 
-The API routes focused knowledge directly and delegates research, controlled analysis, or approved
-enterprise reads to exactly three specialists. The simplified Recursive Language Model path is a
-compiled LangGraph that plans targeted tasks, fans out bounded workers, reduces evidence, checks
-coverage, and permits limited follow-up recursion. See [docs/agents.md](docs/agents.md) and
-[docs/research-graph.md](docs/research-graph.md).
+The root is an agent whose entire tool surface is its four specialists, so it decides which to
+consult, what to ask, and whether the reply settled the question — but it cannot reach a document, a
+record, or a file itself. Each specialist is an autonomous tool-calling loop that chooses its own
+queries, filters, and stopping point. The Recursive Language Model path is the research specialist on
+the Deep Agents harness: it plans with `write_todos`, searches in parallel, and re-plans against what
+it finds rather than running a fixed number of rounds. Autonomy stops at the boundary — tool
+visibility, RBAC, budgets, evidence, and citations stay in code, and the route and status a turn
+reports are rebuilt from the delegations that actually produced evidence. See
+[docs/agents.md](docs/agents.md) and [docs/research-agent.md](docs/research-agent.md).
 
 ## Retrieval, security, failure handling, and memory
 
@@ -260,10 +264,11 @@ Manual role and capability cases are in
 
 ## Assumptions, known limitations, and future improvements
 
-The default is an offline deterministic assessment path; Pinecone, hosted model synthesis, and
-LangSmith require external credentials. Authentication is a hardcoded POC fixture, Compose is
-single-host, feedback is accepted by the API but not persisted, and the assistant never performs
-real banking transactions. The rationale, limitations, and production follow-ups are documented in
+Retrieval and enterprise tools default to offline adapters, but an OpenAI credential is mandatory:
+the root and every specialist is a model-driven loop, so there is no credential-free path to run.
+Pinecone and LangSmith require their own credentials. Authentication is a hardcoded POC fixture,
+Compose is single-host, feedback is accepted by the API but not persisted, and the assistant never
+performs real banking transactions. The rationale, limitations, and production follow-ups are documented in
 [docs/assumptions-and-tradeoffs.md](docs/assumptions-and-tradeoffs.md).
 
 ## Delivery roadmap
@@ -273,7 +278,7 @@ real banking transactions. The rationale, limitations, and production follow-ups
 3. Phase 2 — complete: authentication, authorization, tool gateway, and Redis rate limiting
 4. Phase 3 — complete: sample corpus, ingestion, and hybrid Pinecone retrieval
 5. Phase 4 — complete: controlled root agent, three specialists, skills, and delegation traces
-6. Phase 5 — complete: bounded concurrent research graph with follow-up recursion
+6. Phase 5 — complete: bounded recursive research on the Deep Agents harness
 7. Phase 6 — complete: owner-isolated memory, checkpoints, controlled analysis, and MCP tools
 8. Phase 7 — complete: guardrails, evidence-ledger validation, retries, and safe degradation
 9. Phase 8 — complete: activity UX, correlated traces, golden evaluation, and role E2E tests

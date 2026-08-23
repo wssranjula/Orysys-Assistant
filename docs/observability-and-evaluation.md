@@ -30,7 +30,7 @@ accidentally supplies them.
 
 The API establishes a LangSmith tracing context before creating the root-agent task. Dynamic
 metadata includes request ID, conversation ID, role, and root agent. The context propagates through
-the existing traceable router, root orchestration, delegated subagents, research graph workers,
+the root agent's own loop, each delegation tool, the delegated specialist's tool-calling loop,
 authorization decisions, Tool Gateway, hybrid retrieval, MCP adapter, and output validator.
 
 Tool invocations add tool name and role metadata. Static trace metadata identifies agent,
@@ -39,7 +39,7 @@ same request-scoped identifiers, allowing local correlation when LangSmith is di
 
 ## Golden evaluation
 
-Run the frozen ten-scenario suite offline:
+Run the frozen ten-scenario suite:
 
 ```powershell
 uv run python scripts/run_golden_evaluation.py
@@ -49,6 +49,11 @@ The runner uses the real FastAPI SSE surface, root orchestrator, memory retrieva
 Tool Gateway, citation validator, and conversation memory. It injects the declared MCP timeout,
 retrieval outage, and fabricated-citation faults at deterministic seams. The rate-limit case uses a
 fresh ten-token bucket, and the follow-up case performs two requests in one owned conversation.
+
+`OPENAI_API_KEY` is required. Every specialist is a model-driven loop, so the report measures live
+agent behaviour rather than a credential-free deterministic profile, and the runner exits with that
+message instead of scoring a system nobody deploys. Run-to-run figures therefore vary; the stored
+report is a record of one measured run, not a fixture the test suite asserts against.
 
 The machine-readable result is stored in
 `data/golden_evaluation_report.json`. The current report contains:
@@ -70,12 +75,14 @@ PostgreSQL, Redis, and model-provider topology.
 
 ## Test pyramid
 
-- Unit tests cover contracts, routing, security, retrieval, graph budgets, guardrails, metadata
-  sanitization, activity projection, and evaluation scoring.
-- Graph tests use controlled tools for recursion, concurrency, worker failure, and partial results.
+- Unit tests cover contracts, root delegation, security, retrieval, agent budgets, guardrails,
+  metadata sanitization, activity projection, and evaluation scoring.
+- Specialist tests script the model's turns against controlled tools, so the real agent loop,
+  middleware, and gateway run while assertions about planning, parallel retrieval, budget
+  enforcement, tool failure, timeouts, and partial results stay deterministic.
 - Integration tests cover authentication, SSE, rate limiting, owner-isolated memory, validation,
   trace consistency, and confidential-metadata suppression.
-- End-to-end API tests exercise Viewer, Analyst, and Administrator through agent routing,
+- End-to-end API tests exercise Viewer, Analyst, and Administrator through root delegation,
   retrieval/tools, output validation, and citations.
 - Browser verification covers sign-in, responsive two-column layout, a live grounded request,
   trace/activity updates, and the evidence drawer.

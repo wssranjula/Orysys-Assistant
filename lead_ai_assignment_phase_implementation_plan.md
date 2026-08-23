@@ -800,8 +800,7 @@ class RetrievalService:
         access_scope: AccessScope,
         filters: SearchFilters,
         top_k: int = 6,
-    ) -> list[Evidence]:
-        ...
+    ) -> list[Evidence]: ...
 ```
 
 ### Evidence model
@@ -1450,14 +1449,32 @@ class FinalResponse(BaseModel):
 
 ```python
 class ApplicationError(Exception): ...
+
+
 class InvalidRequestError(ApplicationError): ...
+
+
 class AuthenticationError(ApplicationError): ...
+
+
 class AuthorizationError(ApplicationError): ...
+
+
 class RateLimitError(ApplicationError): ...
+
+
 class RetrievalUnavailableError(ApplicationError): ...
+
+
 class ModelUnavailableError(ApplicationError): ...
+
+
 class ToolTimeoutError(ApplicationError): ...
+
+
 class CitationValidationError(ApplicationError): ...
+
+
 class InsufficientEvidenceError(ApplicationError): ...
 ```
 

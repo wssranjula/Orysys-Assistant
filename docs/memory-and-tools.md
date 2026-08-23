@@ -20,7 +20,7 @@ Authentication tokens, full retrieved documents, raw MCP payload history, and hi
 not written to conversation memory. PostgreSQL is the Compose/deployment backend. The in-memory
 repository and checkpointer are deterministic local-test seams. Checkpoint serialization disables
 pickle fallback and explicitly permits only the application state model classes required by the
-research graph.
+agent graph.
 
 Explicit long-term preferences are stored separately from conversation messages. A caller can list,
 write, or delete only their own preferences through `/v1/memory/preferences`; consent is explicit
