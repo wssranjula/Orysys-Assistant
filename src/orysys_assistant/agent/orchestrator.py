@@ -21,8 +21,10 @@ from typing import Any
 from uuid import uuid4
 
 from langchain.agents import create_agent
+from langchain_core.messages import RemoveMessage
 from langchain_core.tools import StructuredTool
 from langgraph.config import get_stream_writer
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import get_runtime
 from langsmith import traceable
 from pydantic import BaseModel, Field
@@ -36,6 +38,7 @@ from orysys_assistant.agent.middleware_limits import (
     DelegationOnceMiddleware,
     QuietTodoListMiddleware,
     budget_middleware,
+    repair_orphaned_tool_calls,
 )
 from orysys_assistant.agent.models import (
     AgentExecutionResult,
@@ -327,6 +330,7 @@ class RootOrchestrator:
             stream_mode=["custom", "messages"],
         ):
             if deadline is not None and monotonic() >= deadline:
+                await self._repair_checkpoint(thread_id)
                 yield _timeout_result(
                     _final_root_answer(message_text, ordered_message_ids, tool_call_message_ids),
                     ledger,
@@ -357,6 +361,23 @@ class RootOrchestrator:
     async def _started(self, sink: TransitionSink | None) -> None:
         await _publish(sink, _started_transition())
 
+    async def _repair_checkpoint(self, thread_id: str | None) -> None:
+        if self._checkpointer is None:
+            return
+        config = self._config(thread_id)
+        if config is None:
+            return
+        state = await self.graph.aget_state(config)
+        if not state.values:
+            return
+        repaired = repair_orphaned_tool_calls(state.values.get("messages", []))
+        if repaired is None:
+            return
+        await self.graph.aupdate_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *repaired]},
+        )
+
     @staticmethod
     def _input(question: str, conversation_summary: str, long_term_memory: str) -> dict[str, Any]:
         context = "\n\n".join(item for item in (conversation_summary, long_term_memory) if item)
@@ -384,7 +405,7 @@ def _bindings(
     async def run_research(
         request: str, context: TrustedRequestContext, sink: TransitionSink, thread_id: str | None
     ) -> SpecialistOutcome:
-        return await research.run(request, context, sink, thread_id)
+        return await research.run(request, context, sink)
 
     async def run_analysis(
         request: str, context: TrustedRequestContext, sink: TransitionSink, thread_id: str | None

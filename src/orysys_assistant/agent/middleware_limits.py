@@ -11,8 +11,9 @@ from langchain.agents.middleware import (
     ToolCallLimitMiddleware,
 )
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr
-from langchain_core.messages import AIMessage, ToolCall, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage, ToolCall, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
@@ -162,10 +163,97 @@ class DelegationOnceMiddleware(AgentMiddleware[DelegationOnceState, ContextT]):
         return self.after_model(state, runtime)
 
 
+ORPHANED_TOOL_MESSAGE = (
+    "Tool execution did not complete before the turn ended; continuing the conversation."
+)
+
+
+def repair_orphaned_tool_calls(messages: Sequence[Any]) -> list[Any] | None:
+    """Insert synthetic tool responses for unanswered assistant tool calls."""
+
+    if not messages:
+        return None
+
+    repaired: list[Any] = []
+    inserted = False
+    index = 0
+
+    while index < len(messages):
+        message = messages[index]
+        if isinstance(message, AIMessage) and message.tool_calls:
+            repaired.append(message)
+            expected_ids = {tool_call["id"] for tool_call in message.tool_calls}
+            answered_ids: set[str] = set()
+            index += 1
+
+            while index < len(messages) and isinstance(messages[index], ToolMessage):
+                tool_message = messages[index]
+                repaired.append(tool_message)
+                if tool_message.tool_call_id in expected_ids:
+                    answered_ids.add(tool_message.tool_call_id)
+                index += 1
+
+            for tool_call in message.tool_calls:
+                if tool_call["id"] in answered_ids:
+                    continue
+                repaired.append(
+                    ToolMessage(
+                        content=ORPHANED_TOOL_MESSAGE,
+                        tool_call_id=tool_call["id"],
+                        name=tool_call.get("name"),
+                        status="error",
+                    )
+                )
+                inserted = True
+            continue
+
+        repaired.append(message)
+        index += 1
+
+    if not inserted:
+        return None
+    return repaired
+
+
+class RepairToolMessageHistoryMiddleware(AgentMiddleware):
+    """Ensure checkpoint history never sends unanswered tool calls to the model."""
+
+    trace_policy = QUIET_MIDDLEWARE_TRACE_POLICY
+
+    @property
+    def name(self) -> str:
+        return "RepairToolMessageHistory"
+
+    @override
+    def before_model(
+        self,
+        state: AgentState,
+        runtime: Runtime[ContextT],
+    ) -> dict[str, Any] | None:
+        repaired = repair_orphaned_tool_calls(state.get("messages", []))
+        if repaired is None:
+            return None
+        return {
+            "messages": [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *repaired,
+            ]
+        }
+
+    @override
+    async def abefore_model(
+        self,
+        state: AgentState,
+        runtime: Runtime[ContextT],
+    ) -> dict[str, Any] | None:
+        return self.before_model(state, runtime)
+
+
 def budget_middleware(*, max_tool_calls: int, max_model_calls: int) -> list[Any]:
     """Execution budgets with quieter LangSmith middleware spans."""
 
     return [
+        RepairToolMessageHistoryMiddleware(),
         NamedToolTraceMiddleware(),
         QuietToolCallLimitMiddleware(run_limit=max_tool_calls, exit_behavior="continue"),
         QuietModelCallLimitMiddleware(run_limit=max_model_calls, exit_behavior="end"),
